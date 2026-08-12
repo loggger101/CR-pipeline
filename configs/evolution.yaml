@@ -1,0 +1,63 @@
+# Evolutionary Algorithm Hyperparameters
+# Controls population dynamics, selection, crossover, and mutation.
+
+population:
+  size: 200                   # Number of agents per generation
+  elite_count: 10             # Top agents preserved unchanged
+  elite_preservation: true
+
+selection:
+  strategy: "tournament"      # "tournament" or "rank" or "roulette"
+  tournament_size: 5          # Number of competitors in tournament
+  rank_weight: 1.5            # Weight exponent for rank-based selection
+
+crossover:
+  strategy: "blend"           # "blend" or "single_point" or "uniform"
+  rate: 0.7                   # Probability of crossover vs copy
+  blend_alpha: 0.5            # Blend factor (0.5 = equal mix)
+  single_point_prob: 0.3      # Probability per weight of crossing point
+
+mutation:
+  strategy: "gaussian"        # "gaussian" or "uniform" or "adaptive"
+  rate: 0.05                  # Probability per weight to mutate
+  std: 0.1                    # Std dev of Gaussian noise
+  min_std: 0.01               # Minimum mutation std (adaptive mode)
+  max_std: 0.5                # Maximum mutation std (adaptive mode)
+  adaptive: false             # Increase mutation when fitness plateaus
+
+fitness:
+  matches_per_agent: 5        # Matches each agent plays per generation
+  match_duration: "full"      # "full" (3 min) or "overtime" or "short" (1 min)
+  scoring:
+    trophy_gain_weight: 0.4
+    towers_destroyed_weight: 0.3
+    win_bonus: 0.2
+    efficiency_weight: 0.1    # Faster wins rewarded
+  baseline_opponents:
+    - "random"                # Random agent baseline
+    - "greedy"                # Heuristic greedy baseline
+    - "elite_avg"             # Average of top 10 elite agents (self-play)
+
+checkpoint:
+  interval: 10                # Save checkpoint every N generations
+  max_checkpoints: 50         # Maximum checkpoints to keep
+  format: "pt"                # "pt" (PyTorch) or "npz" (NumPy)
+  include:
+    - population_weights
+    - fitness_history
+    - generation_metadata
+    - best_agent_snapshot
+
+training:
+  max_generations: 500
+  early_stopping:
+    enabled: true
+    patience: 30              # Generations without improvement to stop
+    min_improvement: 0.5      # Minimum fitness improvement to count
+  parallel:
+    workers: 8                # Number of parallel simulation workers
+    batch_size: 50            # Agents per batch (if population > workers)
+    timeout: 300              # Max seconds per batch
+  logging:
+    log_interval: 1           # Log every N generations
+    save_full_history: true
