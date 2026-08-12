@@ -1,0 +1,52 @@
+# Simulation Game Configuration
+# Defines arena layout, card balance, and game rules for the low-fidelity engine.
+
+arena:
+  width: 8            # Grid columns
+  height: 6           # Grid rows
+  left_lane: [0, 1, 2, 3]
+  right_lane: [4, 5, 6, 7]
+  opponent_territory: [0, 1, 2]
+  player_territory: [3, 4, 5]
+  bridges: [3, 4]     # Column indices where lanes connect
+
+towers:
+  opponent_princess_left: {col: 3, row: 0, hp: 1400, damage: 75, range: 2.0, target_pref: "ground"}
+  opponent_princess_right: {col: 4, row: 0, hp: 1400, damage: 75, range: 2.0, target_pref: "ground"}
+  opponent_king: {col: 3, row: 1, hp: 2400, damage: 100, range: 3.5, target_pref: "ground"}
+  player_princess_left: {col: 3, row: 5, hp: 1400, damage: 75, range: 2.0, target_pref: "ground"}
+  player_princess_right: {col: 4, row: 5, hp: 1400, damage: 75, range: 2.0, target_pref: "ground"}
+
+game_rules:
+  match_duration_ticks: 1800    # 3 minutes at 0.1s/tick
+  overtime_duration_ticks: 120  # +2 minutes overtime
+  overtime_threshold_trophies: 0  # Trophy difference to trigger overtime
+  elixir_max: 10
+  elixir_regen_rate: 0.3        # Elixir per tick
+  elixir_double_overtime: true
+  deployment_cooldown: 0        # No cooldown between card plays (real CR has ~1s)
+  win_condition: "trophies"       # "trophies" or "towers"
+  trophy_win: 2
+  trophy_loss: 2
+  overtime_trophy_win: 1
+  overtime_trophy_loss: 1
+
+card_deployment_zones:
+  ground: [3, 4, 5]             # Rows where ground cards can be deployed (player territory)
+  air: [3, 4, 5]                # Rows where air cards can be deployed
+  spell: [3, 4, 5]              # Spells can target any row in player territory
+  building: [4, 5]              # Buildings deploy in back rows only
+
+# Arena heatmap normalization for neural net input
+state_input:
+  resolution: 64                # Neural net input resolution (64x64)
+  channels:
+    - name: "card_hand"         # 4 channels, one per card slot
+    - name: "elixir_player"     # 1 channel, elixir level
+    - name: "elixir_opponent"   # 1 channel, opponent elixir
+    - name: "unit_heatmap"      # 1 channel, density of units
+    - name: "tower_health"      # 1 channel, tower HP heatmap
+    - name: "lane_presence"     # 2 channels, left/right lane unit density
+    - name: "bridge_status"     # 1 channel, bridge occupancy
+    - name: "time_remaining"    # 1 channel, normalized time
+  total_channels: 11

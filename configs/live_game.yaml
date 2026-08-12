@@ -1,0 +1,53 @@
+# Live-Game Interaction Configuration
+# Settings for real Clash Royale gameplay interaction.
+
+screen_capture:
+  target_window: "Clash Royale"       # Window title to capture
+  capture_method: "mss"               # "mss", "pyautogui", or "dxcam"
+  resolution: [1280, 720]             # Capture resolution
+  target_resolution: [256, 256]       # Resized for neural net input
+  frame_rate: 15                      # Target FPS
+  color_format: "rgb"                 # "rgb" or "bgr" or "gray"
+
+game_state_extraction:
+  method: "template_matching"         # "template_matching", "color_detection", or "cnn_classifier"
+  card_regions:
+    - {name: "card_1", x: 100, y: 550, w: 80, h: 110}
+    - {name: "card_2", x: 200, y: 550, w: 80, h: 110}
+    - {name: "card_3", x: 300, y: 550, w: 80, h: 110}
+    - {name: "card_4", x: 400, y: 550, w: 80, h: 110}
+  elixir_bar: {x: 1060, y: 640, w: 120, h: 40}
+  tower_health_regions:
+    - {name: "opp_princess_left", x: 200, y: 100, w: 60, h: 30}
+    - {name: "opp_princess_right", x: 1000, y: 100, w: 60, h: 30}
+    - {name: "opp_king", x: 600, y: 50, w: 60, h: 30}
+    - {name: "player_princess_left", x: 200, y: 600, w: 60, h: 30}
+    - {name: "player_princess_right", x: 1000, y: 600, w: 60, h: 30}
+
+action_mapping:
+  method: "mouse_click"               # "mouse_click", "hotkey", or "hybrid"
+  grid_resolution: [8, 6]             # Arena grid for action placement
+  deployment_zone: "player_half"      # Restrict to player's half
+  debounce_ms: 100                    # Minimum time between actions
+  cooldown_validation: true           # Check card cooldown before deploying
+  hotkey_map:
+    "select_card_1": "1"
+    "select_card_2": "2"
+    "select_card_3": "3"
+    "select_card_4": "4"
+    "confirm_placement": "mouse_left"
+
+overlay:
+  enabled: true
+  draw_card_selection: true           # Highlight selected card
+  draw_action_preview: true           # Show predicted placement
+  draw_unit_heatmap: true             # Overlay unit density
+  draw_tower_health: true             # Show tower HP bars
+  fps_display: true                   # Show capture FPS
+  fitness_display: true               # Show current fitness score
+  color_scheme: "default"             # "default", "high_contrast", or "minimal"
+
+performance:
+  max_latency_ms: 66                  # Max acceptable latency (1/15 FPS)
+  buffer_frames: 3                    # Frame buffer for processing
+  auto_reconnect: true                # Reconnect if window lost
