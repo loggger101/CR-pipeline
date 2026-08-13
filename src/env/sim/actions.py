@@ -1,207 +1,327 @@
-"""Discrete action space for the simulation environment.
+"""
+CR-Pipeline: Simulation Action Space
 
-Actions are encoded as (card_index, target_col, target_row) tuples where
-card_index selects from the agent's hand, and (col, row) specifies the
-deployment cell on the arena grid.
+Defines the action space for evolutionary agents playing Clash Royale.
+Actions are decomposed into card selection + placement, with validation
+against game rules (elixir, cooldowns, deployment zones).
 """
 
 from __future__ import annotations
 
+import enum
 from dataclasses import dataclass
-from enum import Enum, auto
-from typing import Optional, Tuple
-
-import numpy as np
+from typing import Optional
 
 
-class ActionType(Enum):
-    """Types of actions the agent can take."""
-    PLAY_CARD = auto()       # Deploy a card at a grid cell
-    PASS = auto()            # Skip this turn
-    INVALID = auto()         # Placeholder for invalid/filtered actions
+class ActionType(enum.Enum):
+    """Base types of actions an agent can take."""
+    # Card deployment actions
+    DEPLOY_UNIT = enum.auto()      # Deploy a unit card
+    DEPLOY_SPELL = enum.auto()     # Cast a spell card
+    # Pass / no-op
+    PASS = enum.auto()             # Do nothing this tick
+    # Future extensions:
+    # SWAP_CARD = enum.auto()       # Swap position in hand
+    # TARGET_ENEMY = enum.auto()    # Target specific enemy (for precision spells)
 
 
 @dataclass(frozen=True)
 class Action:
-    """A single action in the simulation.
+    """
+    A single action from the agent.
+
+    For DEPLOY_UNIT / DEPLOY_SPELL:
+        card_index: Index into the agent's current hand (0-3)
+        target_x: X coordinate on the arena (float)
+        target_y: Y coordinate on the arena (float)
+        target_id: Optional target entity ID (for targeted spells)
+
+    For PASS:
+        All fields are None.
 
     Attributes:
-        action_type: Type of action.
-        card_idx: Index into the agent's card hand (0-3).
-        target_col: Grid column of the target cell.
-        target_row: Grid row of the target cell.
-        valid: Whether this action is legal given current game state.
+        action_type: The type of action.
+        card_index: Which card from the hand (0-3), or None for PASS.
+        target_x: X position for deployment / spell center.
+        target_y: Y position for deployment / spell center.
+        target_id: Optional target entity ID.
+        raw_output: Raw neural network output for logging.
     """
-    action_type: ActionType = ActionType.PASS
-    card_idx: int = -1
-    target_col: float = -1.0
-    target_row: float = -1.0
-    valid: bool = False
+    action_type: ActionType
+    card_index: Optional[int] = None
+    target_x: Optional[float] = None
+    target_y: Optional[float] = None
+    target_id: Optional[str] = None
+    raw_output: Optional[list[float]] = None
 
-    @classmethod
-    def play_card(cls, card_idx: int, target_col: float, target_row: float) -> Action:
-        """Create a PLAY_CARD action."""
-        return cls(
-            action_type=ActionType.PLAY_CARD,
-            card_idx=card_idx,
-            target_col=target_col,
-            target_row=target_row,
-            valid=False,  # Will be set by validator
-        )
-
-    @classmethod
-    def pass_action(cls) -> Action:
-        """Create a PASS action."""
-        return cls(action_type=ActionType.PASS, valid=True)
-
-    @classmethod
-    def invalid(cls) -> Action:
-        """Create an INVALID action."""
-        return cls(action_type=ActionType.INVALID, valid=False)
-
-    def to_tuple(self) -> Tuple[int, float, float]:
-        """Encode as (card_idx, target_col, target_row)."""
-        return (self.card_idx, self.target_col, self.target_row)
-
-    def to_array(self) -> np.ndarray:
-        """Encode as a flat numpy array for neural net input.
-
-        Returns:
-            Array of shape (3,) with [card_idx, target_col, target_row].
-            card_idx is -1 for PASS.
-        """
-        return np.array([self.card_idx, self.target_col, self.target_row],
-                        dtype=np.float32)
-
-    @staticmethod
-    def from_array(arr: np.ndarray) -> Action:
-        """Decode an action from a numpy array."""
-        card_idx = int(arr[0])
-        target_col = float(arr[1])
-        target_row = float(arr[2])
-        if card_idx == -1:
-            return Action.pass_action()
-        return Action.play_card(card_idx, target_col, target_row)
+    def is_valid_action(self) -> bool:
+        """Check if the action has required fields for its type."""
+        if self.action_type == ActionType.PASS:
+            return True
+        if self.action_type in (ActionType.DEPLOY_UNIT, ActionType.DEPLOY_SPELL):
+            if self.card_index is None:
+                return False
+            if self.target_x is None or self.target_y is None:
+                return False
+            return True
+        return False
 
 
 class ActionSpace:
-    """Defines the structure of the action space.
+    """
+    Defines and validates the action space for a single agent.
 
     The action space is decomposed:
-      - Card selection: 0-3 (hand indices) or -1 (pass)
-      - Placement: continuous (col, row) in grid coordinates
+        - Card selection: discrete index into hand (0-3) + PASS
+        - Placement: continuous 2D position clipped to valid deployment zone
 
-    This allows the neural net to output continuous values for placement
-    while keeping card selection discrete (argmax over 5 choices).
+    For neural network output, the agent produces:
+        - card_logits: float32[5] (4 cards + PASS)
+        - position: float32[2] (normalized arena coordinates)
+
+    Total output dimension: 7 (configurable).
     """
 
-    def __init__(self, hand_size: int = 4, grid_cols: int = 8, grid_rows: int = 6):
+    def __init__(
+        self,
+        hand_size: int = 4,
+        arena_width: float = 8.0,
+        arena_height: float = 18.0,
+        use_discrete_position: bool = False,
+        grid_size: int = 10,
+    ):
+        """
+        Args:
+            hand_size: Number of cards in the agent's hand.
+            arena_width: Width of the arena in simulation units.
+            arena_height: Height of the arena in simulation units.
+            use_discrete_position: If True, discretize placement to a grid.
+            grid_size: Number of grid cells per axis (if discrete).
+        """
         self.hand_size = hand_size
-        self.grid_cols = grid_cols
-        self.grid_rows = grid_rows
-        # Total discrete actions: (hand_size + 1) * grid_cols * grid_rows + 1 (pass)
-        self.total_actions = (hand_size + 1) * grid_cols * grid_rows + 1
+        self.arena_width = arena_width
+        self.arena_height = arena_height
+        self.use_discrete_position = use_discrete_position
+        self.grid_size = grid_size
 
-    def is_valid_placement(self, action: Action, arena: np.ndarray) -> bool:
-        """Check if the action's placement is within the arena bounds."""
-        if action.action_type != ActionType.PLAY_CARD:
-            return True
-        col = action.target_col
-        row = action.target_row
-        if not (0 <= col < self.grid_cols and 0 <= row < self.grid_rows):
-            return False
-        # Check the cell isn't occupied by a tower
-        if arena[int(row), int(col)] != 0:
-            return False
-        return True
+        # Total output dimension from neural network
+        # card_logits: hand_size + 1 (for PASS)
+        # position: 2 (x, y)
+        self.output_dim = (hand_size + 1) + 2
 
-    def clip_to_arena(self, action: Action) -> Action:
-        """Clip action placement to valid arena bounds."""
-        if action.action_type != ActionType.PLAY_CARD:
-            return action
-        col = np.clip(action.target_col, 0, self.grid_cols - 1)
-        row = np.clip(action.target_row, 0, self.grid_rows - 1)
+    def parse_network_output(self, output: list[float]) -> Action:
+        """
+        Parse raw neural network output into an Action.
+
+        Args:
+            output: Raw output array of length self.output_dim.
+                    First (hand_size + 1) values are card logits.
+                    Last 2 values are continuous position.
+
+        Returns:
+            Parsed Action object.
+        """
+        if len(output) != self.output_dim:
+            raise ValueError(
+                f"Expected output dim {self.output_dim}, got {len(output)}"
+            )
+
+        card_logits = output[: self.hand_size + 1]
+        position = output[self.hand_size + 1 :]
+
+        # Select card: argmax of logits
+        best_card_idx = card_logits.index(max(card_logits))
+
+        if best_card_idx >= self.hand_size:
+            # PASS was selected
+            return Action(
+                action_type=ActionType.PASS,
+                raw_output=output,
+            )
+
+        # Continuous position -> arena coordinates
+        nx, ny = position[0], position[1]
+
+        # Normalize from [0, 1] to arena coordinates
+        tx = (nx - 0.5) * self.arena_width
+        ty = (ny - 0.5) * self.arena_height
+
+        if self.use_discrete_position:
+            # Quantize to grid
+            grid_x = int(tx * self.grid_size) / self.grid_size
+            grid_y = int(ty * self.grid_size) / self.grid_size
+            tx = grid_x
+            ty = grid_y
+
         return Action(
-            action_type=ActionType.PLAY_CARD,
-            card_idx=action.card_idx,
-            target_col=float(col),
-            target_row=float(row),
-            valid=True,
+            action_type=ActionType.DEPLOY_UNIT,
+            card_index=best_card_idx,
+            target_x=tx,
+            target_y=ty,
+            raw_output=output,
+        )
+
+    def clip_position_to_zone(
+        self,
+        x: float,
+        y: float,
+        owner: int,
+    ) -> tuple[float, float]:
+        """
+        Clip a target position to the valid deployment zone for a player.
+
+        Args:
+            x: X coordinate.
+            y: Y coordinate.
+            owner: Player ID (0 = bottom, 1 = top).
+
+        Returns:
+            Clipped (x, y) coordinates.
+        """
+        # Arena bounds
+        x = max(-self.arena_width / 2, min(self.arena_width / 2, x))
+
+        if owner == 0:
+            # Player 1 deploys on bottom half (y > 0)
+            y = max(0.0, min(self.arena_height / 2, y))
+        else:
+            # Player 2 deploys on top half (y < 0)
+            y = max(-self.arena_height / 2, min(0.0, y))
+
+        return x, y
+
+    def get_action_mask(
+        self,
+        hand: list,
+        elixir: list[float],
+    ) -> list[bool]:
+        """
+        Generate action mask indicating which cards can be played.
+
+        Args:
+            hand: List of card definitions currently in hand.
+            elixir: Current elixir level for each card.
+
+        Returns:
+            Boolean mask of length (hand_size + 1). True = playable.
+            Last entry is always True (PASS is always available).
+        """
+        mask = []
+        for i, card in enumerate(hand):
+            if i < len(elixir):
+                mask.append(elixir[i] >= card.cost)
+            else:
+                mask.append(False)
+        mask.append(True)  # PASS always available
+        return mask
+
+    def to_dict(self) -> dict:
+        """Serialize action space config."""
+        return {
+            "hand_size": self.hand_size,
+            "arena_width": self.arena_width,
+            "arena_height": self.arena_height,
+            "use_discrete_position": self.use_discrete_position,
+            "grid_size": self.grid_size,
+            "output_dim": self.output_dim,
+        }
+
+    @classmethod
+    def from_dict(cls, data: dict) -> ActionSpace:
+        """Deserialize action space config."""
+        return cls(
+            hand_size=data["hand_size"],
+            arena_width=data["arena_width"],
+            arena_height=data["arena_height"],
+            use_discrete_position=data.get("use_discrete_position", False),
+            grid_size=data.get("grid_size", 10),
         )
 
 
 class ActionValidator:
-    """Validates actions against game state constraints.
-
-    Checks:
-    - Card is in agent's hand
-    - Card is not on cooldown
-    - Agent has enough elixir
-    - Placement is in valid deployment zone for the card type
-    - Placement cell is not occupied
+    """
+    Validates whether an Action can be legally executed given the current
+    game state (elixir, cooldowns, deployment zone, etc.).
     """
 
-    def __init__(self, grid_cols: int = 8, grid_rows: int = 6):
-        self.grid_cols = grid_cols
-        self.grid_rows = grid_rows
+    def __init__(self, action_space: ActionSpace):
+        self.action_space = action_space
 
-    def validate(self, action: Action, hand: list, cooldowns: np.ndarray,
-                 elixir: float, card_defs: dict, arena: np.ndarray,
-                 is_player_side: bool = True) -> bool:
-        """Validate an action against current game state.
+    def validate(
+        self,
+        action: Action,
+        hand: list,
+        elixir_levels: list[float],
+        cooldowns: list[float],
+        current_player: int,
+    ) -> tuple[bool, str]:
+        """
+        Validate an action against game rules.
 
         Args:
             action: The action to validate.
-            hand: List of card names currently in hand.
-            cooldowns: Array of remaining cooldown ticks per hand slot.
-            elixir: Current elixir level.
-            card_defs: Card definition registry.
-            arena: Current arena grid state.
-            is_player_side: Whether deployment is on player's half.
+            hand: Current card hand.
+            elixir_levels: Current elixir for each card.
+            cooldowns: Current cooldowns for each card (seconds remaining).
+            current_player: Player ID (0 or 1).
 
         Returns:
-            True if the action is valid.
+            (is_valid, reason): Tuple of validity and explanation string.
         """
         if action.action_type == ActionType.PASS:
-            return True
+            return True, "PASS"
 
-        if action.action_type == ActionType.INVALID:
-            return False
+        if action.card_index is None or action.card_index < 0:
+            return False, "Invalid card index"
 
-        # Check card index is in hand
-        if action.card_idx < 0 or action.card_idx >= len(hand):
-            return False
+        if action.card_index >= len(hand):
+            return False, "Card index out of range"
 
-        card_name = hand[action.card_idx]
-        if card_name not in card_defs:
-            return False
+        card = hand[action.card_index]
 
-        card_def = card_defs[card_name]
+        # Check elixir
+        if elixir_levels[action.card_index] < card.cost:
+            return False, f"Insufficient elixir for {card.name}"
 
         # Check cooldown
-        if cooldowns[action.card_idx] > 0:
-            return False
+        if cooldowns[action.card_index] > 0:
+            return False, f"Card {card.name} on cooldown"
 
-        # Check elixir cost
-        if elixir < card_def.elixir_cost:
-            return False
+        # Check deployment zone
+        if card.deployment_zone is not None:
+            if (
+                card.deployment_zone == DeploymentZone.SELF_SIDE
+                and current_player == 1
+            ):
+                return False, "Cannot deploy on opponent side"
+            if (
+                card.deployment_zone == DeploymentZone.OPPONENT_SIDE
+                and current_player == 0
+            ):
+                return False, "Cannot deploy on self side"
 
-        # Check deployment zone validity
-        if is_player_side:
-            min_row = 3  # Player territory
-        else:
-            min_row = 0  # Opponent territory
+        return True, "Valid"
 
-        if action.target_row < min_row or action.target_row >= self.grid_rows:
-            return False
+    def execute_if_valid(
+        self,
+        action: Action,
+        hand: list,
+        elixir_levels: list[float],
+        cooldowns: list[float],
+        current_player: int,
+    ) -> tuple[bool, Action | None, str]:
+        """
+        Validate and execute an action.
 
-        if action.target_col < 0 or action.target_col >= self.grid_cols:
-            return False
+        Returns:
+            (success, executed_action, reason)
+        """
+        valid, reason = self.validate(action, hand, elixir_levels, cooldowns, current_player)
+        if not valid:
+            return False, None, reason
 
-        # Check cell isn't occupied (simplified)
-        col_int = int(action.target_col)
-        row_int = int(action.target_row)
-        if arena[row_int, col_int] != 0:
-            return False
+        # Deduct elixir
+        if action.card_index is not None:
+            elixir_levels[action.card_index] -= hand[action.card_index].cost
 
-        return True
+        return True, action, reason
