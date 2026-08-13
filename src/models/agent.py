@@ -135,7 +135,7 @@ class EvolutionaryAgent:
             x = torch.tensor(state, dtype=torch.float32).unsqueeze(0).to(self.device)
             card_logits, placement = self.network(x)
 
-        return card_logits.cpu().numpy(), placement.cpu().numpy()
+        return card_logits.squeeze(0).cpu().numpy(), placement.squeeze(0).cpu().numpy()
 
     def select_action(self, state: np.ndarray,
                       valid_cards: Optional[np.ndarray] = None,
@@ -247,7 +247,7 @@ class EvolutionaryAgent:
         Args:
             path: File path to load from.
         """
-        checkpoint = torch.load(path, map_location=self.device)
+        checkpoint = torch.load(path, map_location=self.device, weights_only=False)
         self.set_weights(checkpoint["weights"])
         self.epsilon = checkpoint.get("epsilon", self.epsilon)
         self.total_actions = checkpoint.get("total_actions", 0)

@@ -7,7 +7,7 @@ the core simulation engine, and parallel evaluation infrastructure.
 
 from .engine import SimulationEngine, SimulationStepResult
 from .entities import (
-    CARD_DEFS, TOWER_DEFS, CardDefinition, DeployZone, EntityType,
+    CARD_DEFS, TOWER_DEFS, DeployZone, EntityType,
     TargetPreference, TowerDefinition, UnitDefinition,
     get_card_def, get_tower_def,
 )
@@ -27,7 +27,6 @@ __all__ = [
     # Entities
     "CARD_DEFS",
     "TOWER_DEFS",
-    "CardDefinition",
     "DeployZone",
     "EntityType",
     "TargetPreference",

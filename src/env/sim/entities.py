@@ -105,10 +105,12 @@ class UnitDefinition:
 
 CARD_DEFS: Dict[str, UnitDefinition] = {}
 
-def _register(name: str, **kwargs) -> UnitDefinition:
+def _register(card_name: str, **kwargs) -> UnitDefinition:
     """Register a card definition and return it."""
-    unit = UnitDefinition(**kwargs)
-    CARD_DEFS[name] = unit
+    # Remove 'name' from kwargs if present (it's already the first arg)
+    kwargs.pop('name', None)
+    unit = UnitDefinition(name=card_name, **kwargs)
+    CARD_DEFS[card_name] = unit
     return unit
 
 
@@ -361,8 +363,22 @@ _init_card_defs()
 
 TOWER_DEFS: Dict[str, TowerDefinition] = {}
 
-def _register_tower(name: str, **kwargs) -> TowerDefinition:
-    """Register a tower definition and return it."""
+def _register_tower(tower_name: str, **kwargs) -> TowerDefinition:
+    """Register a tower definition and return it.
+
+    Args:
+        tower_name: Base name without prefix (e.g., 'princess_left').
+                    The prefix (player_/opp_) is added by __post_init__.
+        **kwargs: TowerDefinition keyword arguments.
+    """
+    # Extract base name if prefix is already present
+    base_name = tower_name
+    if base_name.startswith('player_'):
+        base_name = base_name[len('player_'):]
+    elif base_name.startswith('opp_'):
+        base_name = base_name[len('opp_'):]
+    # Ensure 'name' kwarg matches the base name
+    kwargs['name'] = base_name
     tower = TowerDefinition(**kwargs)
     TOWER_DEFS[tower.name] = tower
     return tower
