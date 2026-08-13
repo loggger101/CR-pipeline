@@ -1,0 +1,234 @@
+{
+  "description": "Card data for CR-Pipeline simulation. Mirrors CARD_DEFS in src/env/sim/entities.py.",
+  "cards": {
+    "knight": {
+      "hp": 1400, "damage": 75, "range": 0.75, "speed": 1.0,
+      "target_pref": "ground", "deploy_zone": "ground",
+      "elixir_cost": 3, "aoe": false, "is_building": false
+    },
+    "archers": {
+      "hp": 250, "damage": 60, "range": 2.5, "speed": 1.0,
+      "target_pref": "ground", "deploy_zone": "ground",
+      "elixir_cost": 3, "aoe": false, "is_building": false,
+      "spawn_count": 2, "spawn_type": "archer"
+    },
+    "archer": {
+      "hp": 250, "damage": 60, "range": 2.5, "speed": 1.0,
+      "target_pref": "ground", "deploy_zone": "ground",
+      "elixir_cost": 1, "aoe": false, "is_building": false
+    },
+    "giant": {
+      "hp": 4000, "damage": 120, "range": 0.75, "speed": 0.5,
+      "target_pref": "ground", "deploy_zone": "ground",
+      "elixir_cost": 5, "aoe": false, "is_building": false
+    },
+    "minions": {
+      "hp": 200, "damage": 60, "range": 1.0, "speed": 1.5,
+      "target_pref": "any", "deploy_zone": "air",
+      "elixir_cost": 3, "aoe": false, "is_building": false,
+      "spawn_count": 3, "spawn_type": "minion"
+    },
+    "minion": {
+      "hp": 200, "damage": 60, "range": 1.0, "speed": 1.5,
+      "target_pref": "any", "deploy_zone": "air",
+      "elixir_cost": 1, "aoe": false, "is_building": false
+    },
+    "wizard": {
+      "hp": 600, "damage": 150, "range": 2.5, "speed": 1.0,
+      "target_pref": "ground", "deploy_zone": "ground",
+      "elixir_cost": 5, "aoe": true, "is_building": false
+    },
+    "mini_pekka": {
+      "hp": 1100, "damage": 300, "range": 0.75, "speed": 1.5,
+      "target_pref": "ground", "deploy_zone": "ground",
+      "elixir_cost": 4, "aoe": false, "is_building": false
+    },
+    "valkyrie": {
+      "hp": 1600, "damage": 135, "range": 0.75, "speed": 1.0,
+      "target_pref": "ground", "deploy_zone": "ground",
+      "elixir_cost": 4, "aoe": true, "is_building": false
+    },
+    "baby_dragon": {
+      "hp": 800, "damage": 100, "range": 1.5, "speed": 1.0,
+      "target_pref": "any", "deploy_zone": "air",
+      "elixir_cost": 4, "aoe": true, "is_building": false
+    },
+    "fireball": {
+      "hp": 0, "damage": 500, "range": 1.5, "speed": 0.0,
+      "target_pref": "any", "deploy_zone": "spell",
+      "elixir_cost": 4, "aoe": true, "is_building": false
+    },
+    "zap": {
+      "hp": 0, "damage": 150, "range": 2.0, "speed": 0.0,
+      "target_pref": "any", "deploy_zone": "spell",
+      "elixir_cost": 2, "aoe": true, "is_building": false
+    },
+    "skeletons": {
+      "hp": 100, "damage": 80, "range": 0.75, "speed": 1.5,
+      "target_pref": "ground", "deploy_zone": "ground",
+      "elixir_cost": 3, "aoe": false, "is_building": false,
+      "spawn_count": 3, "spawn_type": "skeleton"
+    },
+    "skeleton": {
+      "hp": 100, "damage": 80, "range": 0.75, "speed": 1.5,
+      "target_pref": "ground", "deploy_zone": "ground",
+      "elixir_cost": 1, "aoe": false, "is_building": false
+    },
+    "barbarians": {
+      "hp": 350, "damage": 100, "range": 0.75, "speed": 1.2,
+      "target_pref": "ground", "deploy_zone": "ground",
+      "elixir_cost": 6, "aoe": false, "is_building": false,
+      "spawn_count": 5, "spawn_type": "barbarian"
+    },
+    "barbarian": {
+      "hp": 350, "damage": 100, "range": 0.75, "speed": 1.2,
+      "target_pref": "ground", "deploy_zone": "ground",
+      "elixir_cost": 1, "aoe": false, "is_building": false
+    },
+    "musketeer": {
+      "hp": 600, "damage": 180, "range": 3.0, "speed": 1.0,
+      "target_pref": "ground", "deploy_zone": "ground",
+      "elixir_cost": 4, "aoe": false, "is_building": false
+    },
+    "prince": {
+      "hp": 1600, "damage": 300, "range": 0.75, "speed": 2.0,
+      "target_pref": "ground", "deploy_zone": "ground",
+      "elixir_cost": 5, "aoe": false, "is_building": false
+    },
+    "bomber": {
+      "hp": 350, "damage": 200, "range": 2.0, "speed": 1.0,
+      "target_pref": "ground", "deploy_zone": "ground",
+      "elixir_cost": 3, "aoe": true, "is_building": false
+    },
+    "goblin": {
+      "hp": 250, "damage": 100, "range": 0.75, "speed": 1.8,
+      "target_pref": "ground", "deploy_zone": "ground",
+      "elixir_cost": 2, "aoe": false, "is_building": false
+    },
+    "ice_golem": {
+      "hp": 1000, "damage": 80, "range": 0.75, "speed": 1.0,
+      "target_pref": "ground", "deploy_zone": "ground",
+      "elixir_cost": 2, "aoe": false, "is_building": false
+    },
+    "elixir_golem": {
+      "hp": 1000, "damage": 80, "range": 0.75, "speed": 1.0,
+      "target_pref": "ground", "deploy_zone": "ground",
+      "elixir_cost": 3, "aoe": false, "is_building": false
+    },
+    "dragon": {
+      "hp": 1200, "damage": 120, "range": 1.5, "speed": 1.0,
+      "target_pref": "any", "deploy_zone": "air",
+      "elixir_cost": 4, "aoe": true, "is_building": false
+    },
+    "electro_dragon": {
+      "hp": 1400, "damage": 120, "range": 1.5, "speed": 1.0,
+      "target_pref": "any", "deploy_zone": "air",
+      "elixir_cost": 5, "aoe": true, "is_building": false
+    },
+    "inferno_dragon": {
+      "hp": 1000, "damage": 50, "range": 1.5, "speed": 1.0,
+      "target_pref": "any", "deploy_zone": "air",
+      "elixir_cost": 4, "aoe": false, "is_building": false
+    },
+    "royal_giant": {
+      "hp": 3000, "damage": 150, "range": 4.0, "speed": 0.5,
+      "target_pref": "ground", "deploy_zone": "ground",
+      "elixir_cost": 7, "aoe": false, "is_building": false
+    },
+    "witch": {
+      "hp": 800, "damage": 100, "range": 2.5, "speed": 1.0,
+      "target_pref": "ground", "deploy_zone": "ground",
+      "elixir_cost": 5, "aoe": false, "is_building": false
+    },
+    "heal_spell": {
+      "hp": 0, "damage": 0, "range": 2.0, "speed": 0.0,
+      "target_pref": "any", "deploy_zone": "spell",
+      "elixir_cost": 4, "aoe": true, "is_building": false
+    },
+    "tornado": {
+      "hp": 0, "damage": 50, "range": 2.0, "speed": 0.0,
+      "target_pref": "any", "deploy_zone": "spell",
+      "elixir_cost": 3, "aoe": true, "is_building": false
+    },
+    "poison_spell": {
+      "hp": 0, "damage": 50, "range": 2.0, "speed": 0.0,
+      "target_pref": "any", "deploy_zone": "spell",
+      "elixir_cost": 4, "aoe": true, "is_building": false
+    },
+    "wall_breakers": {
+      "hp": 300, "damage": 400, "range": 0.5, "speed": 2.5,
+      "target_pref": "ground", "deploy_zone": "ground",
+      "elixir_cost": 3, "aoe": false, "is_building": false
+    },
+    "balloon": {
+      "hp": 1200, "damage": 200, "range": 1.5, "speed": 1.5,
+      "target_pref": "ground", "deploy_zone": "air",
+      "elixir_cost": 5, "aoe": false, "is_building": false
+    },
+    "lumberjack": {
+      "hp": 1600, "damage": 200, "range": 0.75, "speed": 1.8,
+      "target_pref": "ground", "deploy_zone": "ground",
+      "elixir_cost": 4, "aoe": false, "is_building": false
+    },
+    "electro_wizard": {
+      "hp": 600, "damage": 150, "range": 2.5, "speed": 1.0,
+      "target_pref": "ground", "deploy_zone": "ground",
+      "elixir_cost": 4, "aoe": false, "is_building": false
+    },
+    "mega_knight": {
+      "hp": 3500, "damage": 200, "range": 0.75, "speed": 1.2,
+      "target_pref": "ground", "deploy_zone": "ground",
+      "elixir_cost": 7, "aoe": false, "is_building": false
+    },
+    "hog_rider": {
+      "hp": 1600, "damage": 250, "range": 1.0, "speed": 2.5,
+      "target_pref": "ground", "deploy_zone": "ground",
+      "elixir_cost": 4, "aoe": false, "is_building": false
+    },
+    "golem": {
+      "hp": 6000, "damage": 150, "range": 0.75, "speed": 0.4,
+      "target_pref": "ground", "deploy_zone": "ground",
+      "elixir_cost": 8, "aoe": false, "is_building": false
+    },
+    "night_witch": {
+      "hp": 800, "damage": 100, "range": 2.5, "speed": 1.0,
+      "target_pref": "ground", "deploy_zone": "air",
+      "elixir_cost": 4, "aoe": false, "is_building": false
+    },
+    "spear_goblins": {
+      "hp": 150, "damage": 100, "range": 2.5, "speed": 1.5,
+      "target_pref": "ground", "deploy_zone": "ground",
+      "elixir_cost": 2, "aoe": false, "is_building": false,
+      "spawn_count": 3, "spawn_type": "spear_goblin"
+    },
+    "spear_goblin": {
+      "hp": 150, "damage": 100, "range": 2.5, "speed": 1.5,
+      "target_pref": "ground", "deploy_zone": "ground",
+      "elixir_cost": 1, "aoe": false, "is_building": false
+    },
+    "x_bow": {
+      "hp": 1800, "damage": 180, "range": 4.0, "speed": 0.0,
+      "target_pref": "ground", "deploy_zone": "building",
+      "elixir_cost": 6, "aoe": false, "is_building": true
+    },
+    "tombstone": {
+      "hp": 800, "damage": 0, "range": 1.0, "speed": 0.0,
+      "target_pref": "ground", "deploy_zone": "building",
+      "elixir_cost": 3, "aoe": false, "is_building": true,
+      "spawn_count": 3, "spawn_type": "skeleton"
+    },
+    "tesla": {
+      "hp": 1200, "damage": 150, "range": 2.5, "speed": 0.0,
+      "target_pref": "ground", "deploy_zone": "building",
+      "elixir_cost": 4, "aoe": false, "is_building": true
+    }
+  },
+  "towers": {
+    "opp_princess_left": { "hp": 1400, "damage": 75, "range": 2.0, "is_king": false },
+    "opp_princess_right": { "hp": 1400, "damage": 75, "range": 2.0, "is_king": false },
+    "opp_king": { "hp": 2400, "damage": 100, "range": 3.5, "is_king": true, "activation_range": 4.0 },
+    "player_princess_left": { "hp": 1400, "damage": 75, "range": 2.0, "is_king": false },
+    "player_princess_right": { "hp": 1400, "damage": 75, "range": 2.0, "is_king": false },
+    "player_king": { "hp": 2400, "damage": 100, "range": 3.5, "is_king": true, "activation_range": 4.0 }
+  }
+}
