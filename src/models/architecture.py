@@ -157,7 +157,7 @@ class CNNLSTMAgent(nn.Module):
 
     def get_weights(self) -> np.ndarray:
         """Extract network weights as numpy array."""
-        return torch.cat([p.flatten() for p in self.parameters()]).cpu().numpy()
+        return torch.cat([p.detach().flatten() for p in self.parameters()]).cpu().numpy()
 
     def set_weights(self, weights: np.ndarray) -> None:
         """Set network weights from numpy array."""
@@ -165,6 +165,8 @@ class CNNLSTMAgent(nn.Module):
         idx = 0
         for param in self.parameters():
             size = param.numel()
+            if idx + size > len(flat):
+                raise ValueError(f"Weight size mismatch: need {size}, have {len(flat) - idx}")
             param.data = flat[idx:idx + size].view(param.shape).clone()
             idx += size
 
@@ -247,7 +249,7 @@ class CNNMLPAgent(nn.Module):
 
     def get_weights(self) -> np.ndarray:
         """Extract network weights as numpy array."""
-        return torch.cat([p.flatten() for p in self.parameters()]).cpu().numpy()
+        return torch.cat([p.detach().flatten() for p in self.parameters()]).cpu().numpy()
 
     def set_weights(self, weights: np.ndarray) -> None:
         """Set network weights from numpy array."""
@@ -255,6 +257,8 @@ class CNNMLPAgent(nn.Module):
         idx = 0
         for param in self.parameters():
             size = param.numel()
+            if idx + size > len(flat):
+                raise ValueError(f"Weight size mismatch: need {size}, have {len(flat) - idx}")
             param.data = flat[idx:idx + size].view(param.shape).clone()
             idx += size
 

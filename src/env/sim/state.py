@@ -27,6 +27,10 @@ class UnitState:
         target_row: Current attack target row.
         is_alive: Whether the unit is still alive.
         is_building: Whether this is a stationary structure.
+        speed: Movement speed (cells per tick).
+        range: Attack range in grid cells.
+        damage: Damage per attack tick.
+        target_pref: Preferred target type.
     """
     unit_type: str
     owner: str
@@ -38,6 +42,10 @@ class UnitState:
     target_row: float = -1.0
     is_alive: bool = True
     is_building: bool = False
+    speed: float = 1.0
+    range: float = 1.0
+    damage: int = 0
+    target_pref: int = 0  # TargetPreference enum value
 
     def take_damage(self, damage: float) -> float:
         """Apply damage and return actual damage dealt."""

@@ -117,12 +117,10 @@ class TestSimulationEngine:
         engine = SimulationEngine(seed=42)
         state = engine.reset()
 
-        # Manually destroy opponent king tower
-        for tower in engine.opponent_towers:
-            if tower.is_building and tower.unit_type == "tower":
-                tower.hp = 0
-                tower.is_alive = False
-                break
+        # Manually destroy opponent king tower (highest HP tower)
+        king_tower = max(engine.opponent_towers, key=lambda t: t.hp)
+        king_tower.hp = 0
+        king_tower.is_alive = False
 
         # Step once to trigger win check
         result = engine.step(Action.pass_action())

@@ -21,7 +21,7 @@ from typing import Dict, List, Optional, Tuple
 import numpy as np
 
 from .entities import (
-    CARD_DEFS, TOWER_DEFS, CardDefinition, DeployZone, EntityType,
+    CARD_DEFS, TOWER_DEFS, DeployZone, EntityType,
     TargetPreference, TowerDefinition, UnitDefinition,
 )
 from .actions import Action, ActionType
@@ -230,6 +230,8 @@ class SimulationEngine:
                 is_alive=True,
                 is_building=True,
             )
+            if defn.is_king:
+                unit.is_building = False
             self.opponent_towers.append(unit)
             self.opponent_units.append(unit)
             self.arena[int(row), int(col)] = 1  # Occupied
@@ -252,6 +254,8 @@ class SimulationEngine:
                 is_alive=True,
                 is_building=True,
             )
+            if defn.is_king:
+                unit.is_building = False
             self.player_towers.append(unit)
             self.player_units.append(unit)
             self.arena[int(row), int(col)] = 1
@@ -434,6 +438,10 @@ class SimulationEngine:
             row=row,
             is_alive=True,
             is_building=card_def.is_building,
+            speed=card_def.speed,
+            range=card_def.range,
+            damage=card_def.damage,
+            target_pref=card_def.target_pref,
         )
 
         if player == "player":
@@ -541,10 +549,11 @@ class SimulationEngine:
         if active_towers:
             king_tower = next((t for t in active_towers if t.is_building and t.unit_type == "tower"),
                               None)
-            if king_tower and king_tower.activation_range > 0:
+            activation_range = getattr(king_tower, 'activation_range', 4.0)
+            if king_tower and activation_range > 0:
                 dist_to_king = math.sqrt((king_tower.col - unit.col) ** 2 +
                                          (king_tower.row - unit.row) ** 2)
-                if dist_to_king > king_tower.activation_range:
+                if dist_to_king > activation_range:
                     # Remove king tower from targets
                     active_towers = [t for t in active_towers
                                      if not (t.is_building and t.unit_type == "tower")]
