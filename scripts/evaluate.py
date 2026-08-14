@@ -24,21 +24,43 @@ import torch
 
 from src.train import FitnessEvaluator
 from src.env.sim import SimulationEngine
+from src.models.policy import DEFAULT_POLICY_SPEC
 
 
 def load_checkpoint(path: str) -> np.ndarray:
-    """Load agent weights from a checkpoint file.
+    """Load an agent's policy genome from a checkpoint file.
 
     Args:
         path: Path to the checkpoint file.
 
     Returns:
-        Numpy array of weights.
+        Numpy array holding the policy genome.
+
+    Raises:
+        ValueError: if the checkpoint holds Torch network parameters rather
+            than a policy genome, which cannot be played by the simulator.
     """
-    checkpoint = torch.load(path, map_location="cpu")
-    if isinstance(checkpoint, dict) and "weights" in checkpoint:
-        return np.array(checkpoint["weights"])
-    return np.array(checkpoint)
+    # weights_only=False: these checkpoints carry numpy arrays and metadata,
+    # not just tensors.
+    checkpoint = torch.load(path, map_location="cpu", weights_only=False)
+    if not isinstance(checkpoint, dict):
+        return np.asarray(checkpoint)
+
+    for key in ("genome", "weights"):
+        if checkpoint.get(key) is not None:
+            weights = np.asarray(checkpoint[key])
+            break
+    else:
+        raise ValueError(f"{path} contains no agent parameters")
+
+    expected = DEFAULT_POLICY_SPEC.num_params
+    if weights.size != expected:
+        raise ValueError(
+            f"{path} holds {weights.size} parameters but the simulator plays "
+            f"{expected}-parameter policy genomes. This checkpoint most likely "
+            f"stores Torch network weights, which the match runner cannot use."
+        )
+    return weights
 
 
 def main():

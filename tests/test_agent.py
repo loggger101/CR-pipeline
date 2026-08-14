@@ -100,7 +100,7 @@ class TestEvolutionaryAgent:
             action = agent.select_action(state)
             actions.append(action)
 
-        pass_count = sum(1 for a in actions if a["card_idx"] == -1)
+        pass_count = sum(1 for a in actions if a["card_idx"] == 4)  # card_idx 4 = pass
         assert pass_count > 0
 
     def test_get_weights(self):
