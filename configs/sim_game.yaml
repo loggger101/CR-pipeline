@@ -1,52 +1,138 @@
 # Simulation Game Configuration
-# Defines arena layout, card balance, and game rules for the low-fidelity engine.
+# Defines arena layout, card balance, and game rules for the simulation engine.
+#
+# This config is validated against the SimulationConfig schema.
+# Most fields have sensible defaults.
 
+# ── Arena Layout ─────────────────────────────────────────────────────────────
 arena:
-  width: 8            # Grid columns
-  height: 6           # Grid rows
-  left_lane: [0, 1, 2, 3]
-  right_lane: [4, 5, 6, 7]
-  opponent_territory: [0, 1, 2]
-  player_territory: [3, 4, 5]
-  bridges: [3, 4]     # Column indices where lanes connect
+  width: 8                     # Grid columns
+  height: 6                    # Grid rows
+  left_lane: [0, 1, 2, 3]      # Column indices for left lane
+  right_lane: [4, 5, 6, 7]     # Column indices for right lane
+  opponent_territory: [0, 1, 2]  # Rows belonging to opponent
+  player_territory: [3, 4, 5]    # Rows belonging to player
+  bridges: [3, 4]              # Column indices where lanes connect
 
+# ── Tower Definitions ───────────────────────────────────────────────────────
+# Mirrors SimulationEngine._place_towers and get_default_tower_registry().
+# Princess towers sit closer to the river than their king, so attackers meet a
+# princess tower first. Stats are Level 11.
 towers:
-  opponent_princess_left: {col: 3, row: 0, hp: 1400, damage: 75, range: 2.0, target_pref: "ground"}
-  opponent_princess_right: {col: 4, row: 0, hp: 1400, damage: 75, range: 2.0, target_pref: "ground"}
-  opponent_king: {col: 3, row: 1, hp: 2400, damage: 100, range: 3.5, target_pref: "ground"}
-  player_princess_left: {col: 3, row: 5, hp: 1400, damage: 75, range: 2.0, target_pref: "ground"}
-  player_princess_right: {col: 4, row: 5, hp: 1400, damage: 75, range: 2.0, target_pref: "ground"}
+  opponent_princess_left:
+    col: 2
+    row: 1
+    hp: 2534
+    damage: 109
+    attack_speed: 0.8
+    range: 7.5
+    crown_reward: 1
+  opponent_princess_right:
+    col: 5
+    row: 1
+    hp: 2534
+    damage: 109
+    attack_speed: 0.8
+    range: 7.5
+    crown_reward: 1
+  opponent_king:
+    col: 3.5
+    row: 0
+    hp: 4008
+    damage: 109
+    attack_speed: 1.0
+    range: 7.0
+    crown_reward: 3
+    starts_inactive: true       # Wakes on damage, or when a princess falls
+  player_princess_left:
+    col: 2
+    row: 4
+    hp: 2534
+    damage: 109
+    attack_speed: 0.8
+    range: 7.5
+    crown_reward: 1
+  player_princess_right:
+    col: 5
+    row: 4
+    hp: 2534
+    damage: 109
+    attack_speed: 0.8
+    range: 7.5
+    crown_reward: 1
+  player_king:
+    col: 3.5
+    row: 5
+    hp: 4008
+    damage: 109
+    attack_speed: 1.0
+    range: 7.0
+    crown_reward: 3
+    starts_inactive: true
 
+# ── Game Rules ──────────────────────────────────────────────────────────────
+# Timebase: SimulationEngine.TICKS_PER_SECOND = 10, so one tick is 0.1s.
+# Card stats are authored in seconds (attack_speed) and tiles-per-second
+# (move_speed) and are converted through that constant.
 game_rules:
-  match_duration_ticks: 1800    # 3 minutes at 0.1s/tick
-  overtime_duration_ticks: 120  # +2 minutes overtime
-  overtime_threshold_trophies: 0  # Trophy difference to trigger overtime
-  elixir_max: 10
-  elixir_regen_rate: 0.3        # Elixir per tick
-  elixir_double_overtime: true
-  deployment_cooldown: 0        # No cooldown between card plays (real CR has ~1s)
-  win_condition: "trophies"       # "trophies" or "towers"
-  trophy_win: 2
-  trophy_loss: 2
-  overtime_trophy_win: 1
-  overtime_trophy_loss: 1
+  match_duration_ticks: 1800   # 180s regulation, matching a real match
+  overtime_duration_ticks: 120 # +12s overtime
+  elixir_max: 10               # Maximum elixir
+  # 1 elixir per 2.8s at 10 ticks/s, the real single-elixir rate. The engine
+  # uses this value when elixir_regen_rate is not passed explicitly.
+  elixir_regen_rate: 0.0357
+  elixir_double_overtime: true # Double elixir in overtime
+  deployment_cooldown: 3       # Ticks a hand slot is locked after a play
+  # Matches are scored on crowns: 1 per princess tower, 3 for the king.
+  # Destroying the king ends the match immediately. If crowns are level when
+  # regulation ends the match goes to overtime; a crown lead ends it there.
+  win_condition: "crowns"
+  crown_princess_tower: 1
+  crown_king_tower: 3
 
+# ── Card Deployment Zones (player side; opponent is mirrored) ───────────────
 card_deployment_zones:
-  ground: [3, 4, 5]             # Rows where ground cards can be deployed (player territory)
-  air: [3, 4, 5]                # Rows where air cards can be deployed
-  spell: [3, 4, 5]              # Spells can target any row in player territory
-  building: [4, 5]              # Buildings deploy in back rows only
+  ground: [3, 4, 5]            # Rows for ground cards (player territory)
+  air: [3, 4, 5]               # Rows for air cards
+  # Spells target the whole arena. Confining them to the caster's own half
+  # left every damage spell unable to reach an enemy tower or push.
+  spell: [0, 1, 2, 3, 4, 5]
+  building: [4, 5]             # Rows for buildings (back only)
 
-# Arena heatmap normalization for neural net input
+# ── State Input Configuration ───────────────────────────────────────────────
 state_input:
-  resolution: 64                # Neural net input resolution (64x64)
+  resolution: 64               # Neural net input resolution (64x64)
   channels:
-    - name: "card_hand"         # 4 channels, one per card slot
-    - name: "elixir_player"     # 1 channel, elixir level
-    - name: "elixir_opponent"   # 1 channel, opponent elixir
-    - name: "unit_heatmap"      # 1 channel, density of units
-    - name: "tower_health"      # 1 channel, tower HP heatmap
-    - name: "lane_presence"     # 2 channels, left/right lane unit density
-    - name: "bridge_status"     # 1 channel, bridge occupancy
-    - name: "time_remaining"    # 1 channel, normalized time
-  total_channels: 11
+    - name: "card_hand"        # 4 channels, one per card slot
+      count: 4
+    - name: "elixir_player"    # 1 channel, player elixir level
+      count: 1
+    - name: "elixir_opponent"  # 1 channel, opponent elixir
+      count: 1
+    - name: "unit_heatmap"     # 1 channel, unit density
+      count: 1
+    - name: "tower_health"     # 1 channel, tower HP heatmap
+      count: 1
+    - name: "lane_presence"    # 2 channels, left/right lane density
+      count: 2
+    - name: "bridge_status"    # 1 channel, bridge occupancy
+      count: 1
+    - name: "time_remaining"   # 1 channel, normalized time
+      count: 1
+  total_channels: 11            # Total input channels
+
+# ── Data Augmentation ───────────────────────────────────────────────────────
+augmentation:
+  enabled: true                # Enable data augmentation
+  intensity: 0.5               # Augmentation intensity (0-1)
+  strategies:
+    deck_composition: true     # Augment deck compositions
+    card_order: true           # Shuffle card order
+    opponent_strategy: true    # Vary opponent strategies
+    game_conditions: true      # Vary game conditions
+    elixir_advantage: true     # Elixir imbalance
+    timing: true               # Timing variation
+  intensity_presets:
+    light: 0.3
+    medium: 0.5
+    heavy: 0.8
