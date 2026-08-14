@@ -93,6 +93,12 @@ CR-Pipeline/
 │   │   ├── replay.py               # Replay viewer
 │   │   ├── live_game_view.py       # Live gameplay overlay
 │   │   └── rendering.py            # Simulation arena renderer
+│   ├── ui/                       # Desktop application (Tkinter)
+│   │   ├── app.py                  # Window and the four tabs
+│   │   ├── operations.py           # Pipeline actions the UI drives
+│   │   ├── jobs.py                 # Background job runner + event queue
+│   │   ├── arena_canvas.py         # Arena drawn on a Tk canvas
+│   │   └── chart.py                # Embedded matplotlib chart
 │   ├── deploy/                   # Model export & deployment
 │   │   └── export.py              # ONNX, TorchScript, NumPy, JSON export
 │   ├── config/                   # Configuration system
@@ -105,7 +111,11 @@ CR-Pipeline/
 │   ├── evolution.yaml            # Evolution hyperparameters
 │   ├── sim_game.yaml             # Simulation engine config
 │   └── live_game.yaml            # Live-game interaction config
+├── packaging/                    # Standalone executable build
+│   ├── crp_gui.spec              # PyInstaller spec
+│   └── build_exe.py              # Build script
 ├── scripts/                      # Entry points
+│   ├── crp_gui.py                # Desktop app launcher
 │   ├── crp.py                    # Unified CLI (11 commands)
 │   ├── train_sim.py              # Simulation training
 │   ├── train_self_play.py        # Self-play evolution
@@ -180,6 +190,68 @@ For GPU acceleration, install PyTorch with CUDA:
 ```bash
 pip install torch torchvision --index-url https://download.pytorch.org/whl/cu118
 ```
+
+---
+
+## 🖥️ Desktop App
+
+A native window for driving the pipeline — no terminal, no browser.
+
+```bash
+python scripts/crp_gui.py
+```
+
+| Tab | What it does |
+|---|---|
+| **Train** | Set population, generations, tournament format, seed and workers. Start/stop a run and watch generation, best/mean fitness, champion ELO and record update live on a chart. |
+| **Watch** | Load an agent and watch it play a match on the arena — towers, troops, elixir and crowns — with play/pause, scrubbing and a speed control. |
+| **Runs** | Every past run with its generation count and best score. Select two or more to compare their fitness curves. |
+| **Agents** | Load a saved agent and play it against all five scripted baselines, or head-to-head against a second agent. |
+
+Each run gets its own timestamped folder under `runs/`, and a finished run
+hands its best agent straight to the Watch and Agents tabs.
+
+Training runs on a worker thread, so the window stays responsive; **Stop** ends
+the run cleanly after the current generation rather than killing it mid-tournament.
+
+### Building a standalone executable
+
+```bash
+pip install pyinstaller
+python packaging/build_exe.py --clean
+```
+
+Produces `CR-Pipeline/CR-Pipeline.exe`. Double-click it — runs are saved to a
+`runs` folder beside the executable. The build takes several minutes.
+
+**Where it builds.** Normally into `dist/` in the project. If the project sits
+in a cloud-synced folder (OneDrive, Dropbox), the build moves to
+`%LOCALAPPDATA%\CR-Pipeline-build` instead — a multi-gigabyte bundle written
+into a synced folder gets uploaded, and the sync client locks files mid-build,
+which surfaces as a baffling `PermissionError` partway through. Override with
+`--output PATH`.
+
+**On bundle size.** With a CUDA build of PyTorch the bundle is around 4 GB,
+almost all of it GPU libraries. The app only uses torch to read and write
+checkpoints — the evolved policy is pure NumPy — so building inside a venv with
+the CPU-only wheel cuts it dramatically:
+
+```bash
+pip install torch --index-url https://download.pytorch.org/whl/cpu
+```
+
+`build_exe.py` detects a CUDA install and says so before building.
+
+**Debugging a frozen build.** A windowed build reports startup failures in a
+message box you cannot capture. Set `CRP_CONSOLE=1` before building to get a
+console variant that prints the traceback instead.
+
+The frozen entry point calls `multiprocessing.freeze_support()` before anything
+else. Without that, every worker the training pool spawns re-executes the
+`.exe` from the top and opens another window, without end.
+
+If you would rather not build anything, `CR-Pipeline.bat` opens the same app
+using the Python already installed on the machine.
 
 ---
 
@@ -775,8 +847,8 @@ pytest tests/test_integration.py -v
 pytest tests/ --cov=src --cov-report=html
 ```
 
-**Test coverage: 377 tests** across simulation engine, evolution strategies,
-tournament system, visualization, and integration.
+**Test coverage: 412 tests** across simulation engine, evolution strategies,
+tournament system, desktop UI, visualization, and integration.
 
 Several suites are worth calling out because they guard against silent failure
 rather than crashes — the failure mode where everything is green and nothing is

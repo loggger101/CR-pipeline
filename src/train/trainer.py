@@ -25,7 +25,7 @@ import os
 import time
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Dict, List, Optional, Tuple
+from typing import Callable, Dict, List, Optional, Tuple
 
 import numpy as np
 import yaml
@@ -330,6 +330,10 @@ class EvolutionTrainer:
         self.elo_ratings: Dict[str, float] = {}
         self.elo_history: Dict[str, List[float]] = {}
         self.last_tournament = None
+
+        # Optional observer called once per generation with a progress dict.
+        # Set it directly on the instance; see _emit_progress for the payload.
+        self.on_generation: Optional[Callable[[dict], None]] = None
         self.running = False
         self._start_time: float = 0.0
 
@@ -480,6 +484,12 @@ class EvolutionTrainer:
                     self.patience_counter += 1
             else:
                 self.patience_counter += 1
+
+            # 4b. Report progress to any observer (the desktop UI uses this),
+            # and refresh the run-level summary so tools can read a run while
+            # it is still going.
+            self._emit_progress(gen, fitnesses, results)
+            self._save_run_summary(gen)
 
             # 5. Check for phase transition
             if self.config.curriculum_learning:
@@ -698,6 +708,79 @@ class EvolutionTrainer:
 
         self._update_hall_of_fame(weights, results, generation)
         return results
+
+    def _save_run_summary(self, gen: int) -> None:
+        """Write run-level ``fitness_history.json``/``metrics.json``.
+
+        Previously these existed only inside ``gen_XXXX/`` checkpoint folders,
+        so a run directory carried no top-level record of itself -- tooling
+        that reads a run (the dashboard, the desktop UI) found nothing, and a
+        run with checkpointing turned off left no history at all.
+        """
+        try:
+            self.runs_dir.mkdir(parents=True, exist_ok=True)
+            with open(self.runs_dir / "fitness_history.json", "w") as handle:
+                json.dump(self.population.fitness_history, handle, indent=2)
+
+            metrics = {
+                "generation": gen + 1,
+                "max_generations": self.config.max_generations,
+                "best_score": self.best_fitness,
+                "best_score_kind": "elo" if self.tournament_mode else "fitness",
+                "best_generation": self.best_generation,
+                "tournament_mode": self.tournament_mode,
+                "tournament_format": self.config.tournament_format,
+                "population_size": self.config.population_size,
+                "elapsed_seconds": time.time() - self._start_time,
+            }
+            with open(self.runs_dir / "metrics.json", "w") as handle:
+                json.dump(metrics, handle, indent=2)
+
+            if self.elo_history:
+                with open(self.runs_dir / "elo_history.json", "w") as handle:
+                    json.dump(self.elo_history, handle, indent=2)
+        except OSError:
+            logger.warning("Could not write run summary to %s", self.runs_dir)
+
+    def _emit_progress(self, gen: int, fitnesses: List[float],
+                       results: List[MatchResult]) -> None:
+        """Hand a snapshot of this generation to ``on_generation``, if set.
+
+        Lets a caller (the desktop UI) follow a run without reaching into
+        trainer internals or scraping the log. Observer failures are logged
+        and swallowed: a broken progress display must not abort training.
+        """
+        callback = getattr(self, "on_generation", None)
+        if callback is None:
+            return
+
+        champion = max(results, key=lambda r: r.fitness) if results else None
+        snapshot = {
+            "generation": gen + 1,
+            "total_generations": self.config.max_generations,
+            "best_fitness": float(max(fitnesses)) if fitnesses else 0.0,
+            "mean_fitness": float(np.mean(fitnesses)) if fitnesses else 0.0,
+            "min_fitness": float(min(fitnesses)) if fitnesses else 0.0,
+            "std_fitness": float(np.std(fitnesses)) if fitnesses else 0.0,
+            "champion_id": champion.agent_id if champion else None,
+            "champion_elo": (champion.metadata.get("elo") if champion else None),
+            "champion_record": (
+                f"{champion.wins}W/{champion.draws}D/{champion.losses}L"
+                if champion else None
+            ),
+            "best_overall": float(self.best_fitness),
+            "best_generation": self.best_generation,
+            "tournament_matches": (
+                self.last_tournament.total_matches if self.last_tournament else 0
+            ),
+            "hall_of_fame": len(self.hall_of_fame),
+            "elapsed": time.time() - self._start_time,
+        }
+
+        try:
+            callback(snapshot)
+        except Exception:  # pragma: no cover - defensive
+            logger.exception("on_generation callback failed; continuing training")
 
     def _comparable_score(self, record, results: List[MatchResult]) -> float:
         """A score for ``record`` that is comparable across generations.
