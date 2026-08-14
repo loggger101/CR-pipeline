@@ -55,6 +55,36 @@ class MutationStrategy(Enum):
     SPECIATED = auto()  # Speciation-aware mutation
 
 
+# Short aliases accepted in configs alongside the enum member names.
+_STRATEGY_ALIASES = {
+    "single_point": "SINGLE_POINT",
+    "tournament_elite": "TOURNAMENT_ELITE",
+}
+
+
+def _coerce_enum(value, enum_cls, field_name: str):
+    """Accept an enum member or its name (any case) and return the member.
+
+    Raises:
+        ValueError: naming the field and the valid options, so a typo in a
+            config surfaces immediately instead of silently selecting a
+            default operator.
+    """
+    if isinstance(value, enum_cls):
+        return value
+    if isinstance(value, str):
+        key = _STRATEGY_ALIASES.get(value.lower(), value.upper())
+        try:
+            return enum_cls[key]
+        except KeyError:
+            pass
+    valid = ", ".join(member.name.lower() for member in enum_cls)
+    raise ValueError(
+        f"{field_name}={value!r} is not a valid {enum_cls.__name__}; "
+        f"expected one of: {valid}"
+    )
+
+
 # =============================================================================
 # Selection Operators
 # =============================================================================
@@ -595,6 +625,19 @@ class EvolutionConfig:
     seed: Optional[int] = None
 
     def __post_init__(self) -> None:
+        # Callers (TrainingConfig, YAML configs) supply strategy names as
+        # strings. Without coercion the enum comparisons in _init_selection
+        # and friends never match, so every operator silently fell back to its
+        # default -- a trainer asking for tournament selection got roulette --
+        # and get_config_summary() raised AttributeError on `.name`, which
+        # crashed checkpoint saving for any run long enough to reach one.
+        self.selection_strategy = _coerce_enum(
+            self.selection_strategy, SelectionStrategy, "selection_strategy")
+        self.crossover_strategy = _coerce_enum(
+            self.crossover_strategy, CrossoverStrategy, "crossover_strategy")
+        self.mutation_strategy = _coerce_enum(
+            self.mutation_strategy, MutationStrategy, "mutation_strategy")
+
         if self.adaptive_mutation:
             self.mutation_strategy = MutationStrategy.ADAPTIVE
 

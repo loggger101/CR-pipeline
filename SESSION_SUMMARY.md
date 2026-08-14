@@ -261,9 +261,62 @@ training signal, so improvement against them is not the metric being gamed.
 
 ---
 
+---
+
+## Round four: a desktop app to drive it
+
+`python scripts/crp_gui.py` (or `CR-Pipeline.bat`) opens a native Tk window
+with four tabs: **Train** (configure, start/stop, live fitness/ELO chart),
+**Watch** (an agent playing a match on the arena, with scrubbing and speed),
+**Runs** (browse and compare past runs), **Agents** (play a saved agent against
+the baselines or head-to-head against another). `packaging/build_exe.py`
+freezes it into `dist/CR-Pipeline/CR-Pipeline.exe`.
+
+Design notes worth keeping:
+
+- Work runs on a thread and reports through a queue the UI drains on a timer,
+  so widget access stays on the main thread and the window never blocks.
+  Stopping is cooperative — the trainer checks between generations.
+- `src/ui/operations.py` holds the pipeline actions with no Tk import, so the
+  whole thing is testable headlessly; only the widget tests need a display.
+- The arena is drawn as canvas items rather than going through
+  `src/viz/rendering.py`, which returns numpy arrays and would have pulled in
+  Pillow.
+- The frozen entry point calls `multiprocessing.freeze_support()` first. Miss
+  that and every pool worker re-executes the `.exe` and opens another window.
+
+### Three more pipeline bugs the UI surfaced
+
+Building a UI that actually exercises the pipeline turned up defects the test
+suite had been stepping around:
+
+- **Checkpoint saving crashed every run.** `TrainingConfig` passes strategy
+  names as strings (`"tournament"`, `"blend"`, `"gaussian"`) but
+  `EvolutionConfig` is typed for enums, so `get_config_summary()` raised
+  `AttributeError` on `.name`. Default `checkpoint_interval` is 10, so any run
+  reaching generation 10 died — every earlier test had used
+  `checkpoint_interval=100` and never hit it.
+- **Selection strategy was silently ignored.** Same root cause: the string
+  never equalled any enum member, so `_init_selection` fell through to its
+  `else` branch. Every trainer-driven run used *roulette* selection no matter
+  what was configured. Fixed by coercing names to enums in
+  `EvolutionConfig.__post_init__`, which now also rejects typos loudly.
+- **Runs left no top-level record.** `fitness_history.json` and `metrics.json`
+  were written only inside `gen_XXXX/` checkpoint folders, so a run directory
+  had nothing to read at its root — the layout the README documents did not
+  exist. The trainer now writes a run-level summary each generation.
+
+---
+
 ## Where to pick up
 
-1. **Fitness transfer is real but modest.** 10 generations x 16 agents is a
+1. **The frozen build is heavy.** PyTorch dominates the bundle. If size
+   matters, a CPU-only torch wheel would cut it substantially, and the app
+   itself only needs torch for checkpoint I/O.
+2. **Watch tab replays one match at a time.** Watching two saved agents play
+   each other would reuse `play_match` with `opponent_genome`, which is already
+   wired but not exposed in the UI.
+3. **Fitness transfer is real but modest.** 10 generations x 16 agents is a
    small run; the numbers above are a smoke test, not a trained agent. Longer
    runs at larger population are the obvious next step now that the loop scales.
 2. **Hall of fame keeps only the most recent champions.** A diverse archive
