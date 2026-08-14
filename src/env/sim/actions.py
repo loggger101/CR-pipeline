@@ -42,17 +42,32 @@ class Action:
     Attributes:
         action_type: The type of action.
         card_index: Which card from the hand (0-3), or None for PASS.
-        target_x: X position for deployment / spell center.
-        target_y: Y position for deployment / spell center.
+        target_col: Column position for deployment / spell center.
+        target_row: Row position for deployment / spell center.
         target_id: Optional target entity ID.
         raw_output: Raw neural network output for logging.
     """
     action_type: ActionType
     card_index: Optional[int] = None
-    target_x: Optional[float] = None
-    target_y: Optional[float] = None
+    target_col: Optional[float] = None
+    target_row: Optional[float] = None
     target_id: Optional[str] = None
     raw_output: Optional[list[float]] = None
+
+    @staticmethod
+    def play_card(card_idx: int, target_col: float, target_row: float) -> Action:
+        """Create a PLAY_CARD action."""
+        return Action(
+            action_type=ActionType.DEPLOY_UNIT,
+            card_index=card_idx,
+            target_col=target_col,
+            target_row=target_row,
+        )
+
+    @staticmethod
+    def pass_action() -> Action:
+        """Create a PASS action."""
+        return Action(action_type=ActionType.PASS)
 
     def is_valid_action(self) -> bool:
         """Check if the action has required fields for its type."""
@@ -61,10 +76,14 @@ class Action:
         if self.action_type in (ActionType.DEPLOY_UNIT, ActionType.DEPLOY_SPELL):
             if self.card_index is None:
                 return False
-            if self.target_x is None or self.target_y is None:
+            if self.target_col is None or self.target_row is None:
                 return False
             return True
-        return False
+        return True
+
+    def is_deploy_action(self) -> bool:
+        """Check if this is a card deployment action."""
+        return self.action_type in (ActionType.DEPLOY_UNIT, ActionType.DEPLOY_SPELL)
 
 
 class ActionSpace:
@@ -105,8 +124,6 @@ class ActionSpace:
         self.grid_size = grid_size
 
         # Total output dimension from neural network
-        # card_logits: hand_size + 1 (for PASS)
-        # position: 2 (x, y)
         self.output_dim = (hand_size + 1) + 2
 
     def parse_network_output(self, output: list[float]) -> Action:
@@ -156,8 +173,8 @@ class ActionSpace:
         return Action(
             action_type=ActionType.DEPLOY_UNIT,
             card_index=best_card_idx,
-            target_x=tx,
-            target_y=ty,
+            target_col=tx,
+            target_row=ty,
             raw_output=output,
         )
 
@@ -193,25 +210,29 @@ class ActionSpace:
     def get_action_mask(
         self,
         hand: list,
-        elixir: list[float],
+        elixir_levels: list[float],
+        cooldowns: list[int],
     ) -> list[bool]:
         """
         Generate action mask indicating which cards can be played.
 
         Args:
             hand: List of card definitions currently in hand.
-            elixir: Current elixir level for each card.
+            elixir_levels: Current elixir level (single value, not per-card).
+            cooldowns: Current cooldowns for each card (ticks remaining).
 
         Returns:
             Boolean mask of length (hand_size + 1). True = playable.
             Last entry is always True (PASS is always available).
         """
         mask = []
-        for i, card in enumerate(hand):
-            if i < len(elixir):
-                mask.append(elixir[i] >= card.cost)
-            else:
-                mask.append(False)
+        for i in range(len(hand)):
+            card = hand[i]
+            can_play = (
+                elixir_levels >= card.cost if hasattr(elixir_levels, '__ge__')
+                else elixir_levels >= card.cost
+            ) and cooldowns[i] <= 0
+            mask.append(bool(can_play))
         mask.append(True)  # PASS always available
         return mask
 
@@ -251,8 +272,8 @@ class ActionValidator:
         self,
         action: Action,
         hand: list,
-        elixir_levels: list[float],
-        cooldowns: list[float],
+        current_elixir: float,
+        cooldowns: list[int],
         current_player: int,
     ) -> tuple[bool, str]:
         """
@@ -260,9 +281,9 @@ class ActionValidator:
 
         Args:
             action: The action to validate.
-            hand: Current card hand.
-            elixir_levels: Current elixir for each card.
-            cooldowns: Current cooldowns for each card (seconds remaining).
+            hand: Current card hand (list of card names).
+            current_elixir: Current elixir level.
+            cooldowns: Current cooldowns for each card (ticks remaining).
             current_player: Player ID (0 or 1).
 
         Returns:
@@ -277,28 +298,15 @@ class ActionValidator:
         if action.card_index >= len(hand):
             return False, "Card index out of range"
 
-        card = hand[action.card_index]
-
-        # Check elixir
-        if elixir_levels[action.card_index] < card.cost:
-            return False, f"Insufficient elixir for {card.name}"
+        card_name = hand[action.card_index]
 
         # Check cooldown
         if cooldowns[action.card_index] > 0:
-            return False, f"Card {card.name} on cooldown"
+            return False, f"Card {card_name} on cooldown ({cooldowns[action.card_index]} ticks)"
 
-        # Check deployment zone
-        if card.deployment_zone is not None:
-            if (
-                card.deployment_zone == DeploymentZone.SELF_SIDE
-                and current_player == 1
-            ):
-                return False, "Cannot deploy on opponent side"
-            if (
-                card.deployment_zone == DeploymentZone.OPPONENT_SIDE
-                and current_player == 0
-            ):
-                return False, "Cannot deploy on self side"
+        # Check elixir
+        if current_elixir < 0:
+            return False, "No elixir"
 
         return True, "Valid"
 
@@ -306,8 +314,8 @@ class ActionValidator:
         self,
         action: Action,
         hand: list,
-        elixir_levels: list[float],
-        cooldowns: list[float],
+        current_elixir: float,
+        cooldowns: list[int],
         current_player: int,
     ) -> tuple[bool, Action | None, str]:
         """
@@ -316,12 +324,8 @@ class ActionValidator:
         Returns:
             (success, executed_action, reason)
         """
-        valid, reason = self.validate(action, hand, elixir_levels, cooldowns, current_player)
+        valid, reason = self.validate(action, hand, current_elixir, cooldowns, current_player)
         if not valid:
             return False, None, reason
-
-        # Deduct elixir
-        if action.card_index is not None:
-            elixir_levels[action.card_index] -= hand[action.card_index].cost
 
         return True, action, reason

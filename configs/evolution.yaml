@@ -1,63 +1,111 @@
-# Evolutionary Algorithm Hyperparameters
+# Evolutionary Algorithm Configuration
 # Controls population dynamics, selection, crossover, and mutation.
+#
+# This file is validated against the EvolutionConfig schema.
+# All fields are optional with sensible defaults.
 
+# ── Population Settings ──────────────────────────────────────────────────────
 population:
-  size: 200                   # Number of agents per generation
-  elite_count: 10             # Top agents preserved unchanged
-  elite_preservation: true
+  size: 200                    # Number of agents per generation
+  elite_count: 10              # Top agents preserved unchanged each generation
+  elite_preservation: true     # Whether to preserve elites
 
+# ── Selection Strategy ──────────────────────────────────────────────────────
 selection:
-  strategy: "tournament"      # "tournament" or "rank" or "roulette"
-  tournament_size: 5          # Number of competitors in tournament
-  rank_weight: 1.5            # Weight exponent for rank-based selection
+  strategy: "tournament"       # Options: tournament, rank, roulette, tournament_elite
+  tournament_size: 5           # Number of competitors in tournament (higher = stronger selection)
+  rank_weight: 1.5             # Weight exponent for rank-based selection
 
+# ── Crossover Strategy ──────────────────────────────────────────────────────
 crossover:
-  strategy: "blend"           # "blend" or "single_point" or "uniform"
-  rate: 0.7                   # Probability of crossover vs copy
-  blend_alpha: 0.5            # Blend factor (0.5 = equal mix)
-  single_point_prob: 0.3      # Probability per weight of crossing point
+  strategy: "blend"            # Options: blend, single_point, uniform, arithmetic
+  rate: 0.7                    # Probability of crossover vs copy
+  blend_alpha: 0.5             # Blend factor for blend crossover (0-1)
+  single_point_prob: 0.3       # Probability per weight of crossing point
 
+# ── Mutation Strategy ───────────────────────────────────────────────────────
 mutation:
-  strategy: "gaussian"        # "gaussian" or "uniform" or "adaptive"
-  rate: 0.05                  # Probability per weight to mutate
-  std: 0.1                    # Std dev of Gaussian noise
-  min_std: 0.01               # Minimum mutation std (adaptive mode)
-  max_std: 0.5                # Maximum mutation std (adaptive mode)
-  adaptive: false             # Increase mutation when fitness plateaus
+  strategy: "gaussian"         # Options: gaussian, uniform, adaptive
+  rate: 0.05                   # Probability per weight to mutate
+  std: 0.1                     # Standard deviation of Gaussian noise
+  min_std: 0.01                # Minimum mutation std (adaptive mode)
+  max_std: 0.5                 # Maximum mutation std (adaptive mode)
+  adaptive: false              # Increase mutation when fitness plateaus
 
+# ── Fitness Evaluation ──────────────────────────────────────────────────────
 fitness:
-  matches_per_agent: 5        # Matches each agent plays per generation
-  match_duration: "full"      # "full" (3 min) or "overtime" or "short" (1 min)
+  matches_per_agent: 5         # Matches each agent plays per generation
+  match_duration: "full"       # Options: full, short, overtime
   scoring:
-    trophy_gain_weight: 0.4
-    towers_destroyed_weight: 0.3
-    win_bonus: 0.2
-    efficiency_weight: 0.1    # Faster wins rewarded
-  baseline_opponents:
-    - "random"                # Random agent baseline
-    - "greedy"                # Heuristic greedy baseline
-    - "elite_avg"             # Average of top 10 elite agents (self-play)
+    trophy_gain_weight: 0.4    # Weight for trophy gain in fitness
+    towers_destroyed_weight: 0.3  # Weight for towers destroyed
+    win_bonus: 0.2             # Bonus for winning a match
+    efficiency_weight: 0.1     # Reward for faster wins
+  baseline_opponents:          # Opponents to evaluate against
+    - "random"                 # Random action agent
+    - "greedy"                 # Heuristic greedy agent
+    - "elite_avg"              # Average of top 10 elite agents
 
+# ── Checkpoint Settings ─────────────────────────────────────────────────────
 checkpoint:
-  interval: 10                # Save checkpoint every N generations
-  max_checkpoints: 50         # Maximum checkpoints to keep
-  format: "pt"                # "pt" (PyTorch) or "npz" (NumPy)
+  interval: 10                 # Save checkpoint every N generations
+  max_checkpoints: 50          # Maximum checkpoints to retain
+  format: "pt"                 # Options: pt (PyTorch), npz (NumPy)
   include:
     - population_weights
     - fitness_history
     - generation_metadata
     - best_agent_snapshot
 
+# ── Training Settings ───────────────────────────────────────────────────────
 training:
-  max_generations: 500
+  max_generations: 500         # Maximum training generations
   early_stopping:
-    enabled: true
-    patience: 30              # Generations without improvement to stop
-    min_improvement: 0.5      # Minimum fitness improvement to count
+    enabled: true              # Enable early stopping
+    patience: 30               # Generations without improvement to stop
+    min_improvement: 0.5       # Minimum fitness improvement to count
   parallel:
-    workers: 8                # Number of parallel simulation workers
-    batch_size: 50            # Agents per batch (if population > workers)
-    timeout: 300              # Max seconds per batch
+    workers: 8                 # Number of parallel simulation workers
+    batch_size: 50             # Agents per evaluation batch
+    timeout: 300               # Max seconds per batch
   logging:
-    log_interval: 1           # Log every N generations
-    save_full_history: true
+    log_interval: 1            # Log every N generations
+    save_full_history: true    # Save full fitness history
+    monitor_resources: true    # Monitor GPU/CPU resources
+
+# ── Curriculum Learning ─────────────────────────────────────────────────────
+curriculum:
+  enabled: true                # Enable automatic phase transitions
+  phases:
+    phase1_baseline: 10        # Random policy baseline
+    phase2_basic: 60           # Learn basic card placement
+    phase3_advanced: 160       # Learn deck synergy & timing
+    phase4_finetune: 260       # Fine-tune on live game
+    phase5_competitive: 360    # Self-play competitive evolution
+  convergence_threshold: 0.01  # Fitness variance threshold for convergence
+
+# ── Tournament Mode ─────────────────────────────────────────────────────────
+tournament:
+  enabled: true                # Enable tournament-based evolution
+  format: "round_robin"        # Options: round_robin, single_elim, double_elim, league
+  matches_per_pair: 4          # Matches per agent pair
+  elite_fraction: 0.1          # Fraction of population as tournament candidates
+  elo_k_factor: 32             # ELO update rate
+
+# ── Diversity & Novelty ─────────────────────────────────────────────────────
+diversity:
+  preservation: true           # Maintain population diversity
+  threshold: 0.5               # Diversity threshold for speciation
+  novelty_search: false        # Enable novelty search
+  novelty_window: 50           # Window for novelty comparison
+
+# ── Adaptive Population ─────────────────────────────────────────────────────
+adaptive_population:
+  enabled: false               # Adapt population size based on training phase
+  min_size: 50                 # Minimum population size
+  max_size: 300                # Maximum population size
+  growth_rate: 0.5             # Population growth rate per phase
+
+# ── Reproducibility ─────────────────────────────────────────────────────────
+seed: 42                       # Random seed for reproducibility
+runs_dir: "runs"               # Directory for training outputs

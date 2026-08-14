@@ -1,365 +1,227 @@
-"""Live game visualization overlay.
+"""Live game visualization for real-time Clash Royale gameplay.
 
 Provides:
-- Real-time screen capture integration
-- Neural network prediction overlay
-- Fitness tracking display
-- Debug visualization for live gameplay
+- Real-time overlay rendering on the game window
+- Screen capture integration
+- Neural net prediction visualization
+- Fitness tracking overlay
 """
 
 from __future__ import annotations
 
 import logging
+import time
 from dataclasses import dataclass, field
 from typing import Dict, List, Optional, Tuple
 
 import numpy as np
 
+from .rendering import SimulationRenderer
+
 logger = logging.getLogger(__name__)
 
 
 @dataclass
-class LiveOverlayData:
-    """Data for the live game overlay.
+class LiveGameOverlay:
+    """Overlay data for live game visualization.
 
     Attributes:
-        fps: Current capture FPS.
-        card_hand: Current card hand (list of card names).
-        player_elixir: Current player elixir level.
-        opponent_elixir: Current opponent elixir level.
-        predicted_action: Predicted action from the neural net.
-        confidence: Confidence of the prediction.
-        tower_health: Tower health percentages.
-        unit_density: Simplified unit density map.
-        fitness_score: Current fitness score.
-        generation: Current training generation.
-        is_alive: Whether the overlay is active.
+        card_selection: Index of selected card (0-3) or -1.
+        placement_target: (col, row) for placement preview.
+        predicted_probs: Card selection probabilities.
+        current_fitness: Current fitness score.
+        elixir_level: Current elixir level.
+        tower_health: Dict of tower name -> HP ratio.
+        unit_positions: List of (col, row, owner, hp_ratio) tuples.
+        fps: Current frame rate.
+        latency_ms: Current processing latency.
     """
-    fps: float = 0.0
-    card_hand: List[str] = field(default_factory=list)
-    player_elixir: float = 5.0
-    opponent_elixir: float = 5.0
-    predicted_action: Optional[dict] = None
-    confidence: float = 0.0
+    card_selection: int = -1
+    placement_target: Optional[Tuple[float, float]] = None
+    predicted_probs: List[float] = field(default_factory=list)
+    current_fitness: float = 0.0
+    elixir_level: float = 5.0
     tower_health: Dict[str, float] = field(default_factory=dict)
-    unit_density: np.ndarray = field(default_factory=lambda: np.zeros((6, 8)))
-    fitness_score: float = 0.0
-    generation: int = 0
-    is_alive: bool = False
+    unit_positions: List[Tuple[float, float, str, float]] = field(default_factory=list)
+    fps: float = 0.0
+    latency_ms: float = 0.0
 
 
 class LiveGameView:
-    """Manages the live game visualization overlay.
+    """Manages live game visualization overlay.
 
-    Integrates with the screen capture module to display:
-    - Card hand with cooldown indicators
-    - Elixir levels for both players
-    - Predicted actions (card selection + placement preview)
-    - Tower health bars
-    - Unit density heatmap
-    - FPS counter
-    - Fitness score display
+    Handles:
+    - Screen capture integration
+    - Overlay rendering
+    - Neural net prediction display
+    - Fitness tracking
     """
 
-    def __init__(self, config: Optional[dict] = None):
-        """Initialize the live game view.
+    def __init__(
+        self,
+        target_window: str = "Clash Royale",
+        capture_resolution: Tuple[int, int] = (1280, 720),
+        overlay_enabled: bool = True,
+    ):
+        self.target_window = target_window
+        self.capture_resolution = capture_resolution
+        self.overlay_enabled = overlay_enabled
+        self.renderer = SimulationRenderer()
 
-        Args:
-            config: Overlay configuration.
-        """
-        self.config = config or {}
-        self.overlay_data = LiveOverlayData()
+        # State tracking
+        self.current_overlay: Optional[LiveGameOverlay] = None
         self.frame_buffer: List[np.ndarray] = []
         self.fps_history: List[float] = []
-        self.last_frame_time: float = 0.0
+        self._last_frame_time: float = 0.0
 
-        # Overlay settings
-        self.enabled = self.config.get("overlay", {}).get("enabled", True)
-        self.color_scheme = self.config.get("overlay", {}).get(
-            "color_scheme", "default"
-        )
+        # Performance monitoring
+        self.total_frames = 0
+        self.total_processing_time = 0.0
 
-        # Color schemes
-        self.colors = {
-            "default": {
-                "background": (30, 30, 40),
-                "text": (255, 255, 255),
-                "card": (100, 150, 255),
-                "card_selected": (255, 200, 50),
-                "elixir": (150, 100, 255),
-                "tower_player": (50, 200, 50),
-                "tower_opponent": (200, 50, 50),
-                "unit_player": (50, 180, 50),
-                "unit_opponent": (180, 50, 50),
-                "placement": (255, 255, 100),
-                "fps": (100, 255, 100),
-            },
-            "high_contrast": {
-                "background": (0, 0, 0),
-                "text": (255, 255, 255),
-                "card": (0, 255, 255),
-                "card_selected": (255, 255, 0),
-                "elixir": (255, 0, 255),
-                "tower_player": (0, 255, 0),
-                "tower_opponent": (255, 0, 0),
-                "unit_player": (0, 255, 0),
-                "unit_opponent": (255, 0, 0),
-                "placement": (255, 255, 0),
-                "fps": (0, 255, 0),
-            },
-            "minimal": {
-                "background": (0, 0, 0),
-                "text": (200, 200, 200),
-                "card": (150, 150, 150),
-                "card_selected": (255, 255, 255),
-                "elixir": (150, 150, 150),
-                "tower_player": (100, 100, 100),
-                "tower_opponent": (100, 100, 100),
-                "unit_player": (100, 100, 100),
-                "unit_opponent": (100, 100, 100),
-                "placement": (200, 200, 100),
-                "fps": (100, 100, 100),
-            },
-        }
-
-    def update(self, overlay_data: LiveOverlayData) -> None:
+    def update_overlay(self, overlay_data: LiveGameOverlay) -> None:
         """Update the overlay data.
 
         Args:
-            overlay_data: New overlay data to display.
+            overlay_data: New overlay information.
         """
-        self.overlay_data = overlay_data
-        self.overlay_data.is_alive = True
+        self.current_overlay = overlay_data
+        self.total_frames += 1
 
-    def render(self, frame: np.ndarray) -> np.ndarray:
-        """Render the overlay onto a game frame.
+    def render_frame(self, game_frame: np.ndarray) -> np.ndarray:
+        """Render a frame with overlay on top of the game frame.
 
         Args:
-            frame: Game frame (H, W, 3) in BGR or RGB.
+            game_frame: Raw game frame (H, W, 3) BGR or RGB.
 
         Returns:
-            Frame with overlay rendered.
+            Rendered frame with overlay.
         """
-        if not self.enabled:
-            return frame
+        if not self.overlay_enabled or self.current_overlay is None:
+            return game_frame
 
-        colors = self.colors.get(self.color_scheme, self.colors["default"])
-        overlay = frame.copy().astype(np.float32)
-
-        # Draw FPS
-        if self.config.get("overlay", {}).get("fps_display", True):
-            fps_text = f"FPS: {self.overlay_data.fps:.1f}"
-            # Simple text rendering placeholder
-            # In practice, would use cv2.putText or similar
-
-        # Draw card hand
-        if self.config.get("overlay", {}).get("draw_card_selection", True):
-            self._draw_card_hand(overlay, colors)
-
-        # Draw action preview
-        if self.config.get("overlay", {}).get("draw_action_preview", True):
-            self._draw_action_preview(overlay, colors)
-
-        # Draw tower health
-        if self.config.get("overlay", {}).get("draw_tower_health", True):
-            self._draw_tower_health(overlay, colors)
-
-        # Draw fitness
-        if self.config.get("overlay", {}).get("fitness_display", True):
-            self._draw_fitness(overlay, colors)
-
-        return overlay.astype(np.uint8)
-
-    def _draw_card_hand(self, frame: np.ndarray, colors: dict) -> None:
-        """Draw the card hand overlay."""
-        if not self.overlay_data.card_hand:
-            return
-
-        # Placeholder: would draw card rectangles with names
-        # and cooldown indicators in the bottom portion of the screen
-
-    def _draw_action_preview(self, frame: np.ndarray, colors: dict) -> None:
-        """Draw the predicted action preview."""
-        if self.overlay_data.predicted_action is None:
-            return
-
-        # Draw placement preview on the arena
-        action = self.overlay_data.predicted_action
-        if "target_col" in action and "target_row" in action:
-            col = int(action["target_col"])
-            row = int(action["target_row"])
-            # Highlight the target cell
-            if 0 <= row < frame.shape[0] and 0 <= col < frame.shape[1]:
-                # Draw a semi-transparent overlay on target cell
-                pass
-
-    def _draw_tower_health(self, frame: np.ndarray, colors: dict) -> None:
-        """Draw tower health bars."""
-        for tower_name, health_pct in self.overlay_data.tower_health.items():
-            # Draw health bar next to tower position
-            # Placeholder for actual rendering
-            pass
-
-    def _draw_fitness(self, frame: np.ndarray, colors: dict) -> None:
-        """Draw fitness score display."""
-        if self.overlay_data.fitness_score != 0:
-            # Draw fitness score in corner
-            text = f"Fitness: {self.overlay_data.fitness_score:.2f}"
-            # Placeholder for actual text rendering
-            pass
-
-    def get_fps(self) -> float:
-        """Get the current FPS from the frame buffer."""
-        if len(self.fps_history) > 0:
-            return float(np.mean(self.fps_history[-60:]))
-        return self.overlay_data.fps
-
-    def record_frame(self, timestamp: float) -> None:
-        """Record a frame timestamp for FPS calculation."""
-        if self.last_frame_time > 0:
-            fps = 1.0 / (timestamp - self.last_frame_time)
+        # Calculate FPS
+        now = time.time()
+        if self._last_frame_time > 0:
+            fps = 1.0 / (now - self._last_frame_time)
             self.fps_history.append(fps)
-            # Keep last 60 entries
             if len(self.fps_history) > 60:
                 self.fps_history = self.fps_history[-60:]
-        self.last_frame_time = timestamp
+        self._last_frame_time = now
 
-    def reset(self) -> None:
-        """Reset the overlay state."""
-        self.overlay_data.is_alive = False
-        self.overlay_data.fitness_score = 0.0
-        self.overlay_data.predicted_action = None
+        # Get current overlay
+        overlay = self.current_overlay
+
+        # Create overlay image
+        overlay_img = self._create_overlay_image(overlay)
+
+        # Composite overlay onto game frame
+        h, w = game_frame.shape[:2]
+        oh, ow = overlay_img.shape[:2]
+
+        # Place overlay in bottom-right corner
+        result = game_frame.copy()
+        y_start = max(0, h - oh)
+        x_start = max(0, w - ow)
+        result[y_start:y_start + min(oh, h - y_start),
+               x_start:x_start + min(ow, w - x_start)] = \
+            overlay_img[:min(oh, h - y_start), :min(ow, w - x_start)]
+
+        return result
+
+    def _create_overlay_image(self, overlay: LiveGameOverlay) -> np.ndarray:
+        """Create an overlay image from overlay data."""
+        panel_height = 180
+        panel_width = 280
+        img = np.zeros((panel_height, panel_width, 3), dtype=np.uint8)
+        img[:, :] = (20, 20, 30)
+
+        self._draw_card_selection(img, overlay)
+        self._draw_elixir_bar(img, overlay.elixir_level, 40)
+        self._draw_tower_health(img, overlay.tower_health, 80)
+        self._draw_performance_stats(img, overlay.fps, overlay.latency_ms, 150)
+
+        return img
+
+    def _draw_card_selection(self, img, overlay):
+        """Draw card selection info."""
+        slot_width, slot_height = 45, 55
+        start_x, y = 10, 10
+        for i in range(4):
+            x = start_x + i * (slot_width + 5)
+            color = (255, 255, 0) if (i == overlay.card_selection) else (80, 80, 80)
+            for dy in range(slot_height):
+                for dx in range(slot_width):
+                    if 0 <= y + dy < img.shape[0] and 0 <= x + dx < img.shape[1]:
+                        img[y + dy, x + dx] = color
+        if overlay.card_selection >= 0:
+            sel_x = start_x + overlay.card_selection * (slot_width + 5)
+            for dy in range(slot_height):
+                for dx in range(slot_width):
+                    if 0 <= y + dy < img.shape[0] and 0 <= sel_x + dx < img.shape[1]:
+                        img[y + dy, sel_x + dx] = (255, 200, 0)
+
+    def _draw_elixir_bar(self, img, elixir, y):
+        """Draw elixir level bar."""
+        bar_width, bar_height, x = 180, 10, 10
+        ratio = elixir / 10.0
+        for dy in range(bar_height):
+            for dx in range(bar_width):
+                if 0 <= y + dy < img.shape[0] and 0 <= x + dx < img.shape[1]:
+                    img[y + dy, x + dx] = (50, 50, 50)
+        fill_width = int(bar_width * ratio)
+        for dy in range(bar_height):
+            for dx in range(fill_width):
+                if 0 <= y + dy < img.shape[0] and 0 <= x + dx < img.shape[1]:
+                    img[y + dy, x + dx] = (180, 50, 200)
+        text = f"Elixir: {elixir:.1f}"
+        for i, c in enumerate(text):
+            tx = x + i * 7
+            if 0 <= y + 15 < img.shape[0] and 0 <= tx < img.shape[1]:
+                img[y + 15, tx] = (255, 255, 255)
+
+    def _draw_tower_health(self, img, tower_health, y):
+        """Draw tower health bars."""
+        for i, (name, ratio) in enumerate(tower_health.items()):
+            bar_width, bar_height, x = 55, 6, 10 + i * 65
+            color = (0, 255, 0) if ratio > 0.5 else (255, 0, 0) if ratio < 0.2 else (255, 255, 0)
+            for dy in range(bar_height):
+                for dx in range(bar_width):
+                    if 0 <= y + dy < img.shape[0] and 0 <= x + dx < img.shape[1]:
+                        img[y + dy, x + dx] = (50, 50, 50)
+            fill_width = int(bar_width * ratio)
+            for dy in range(bar_height):
+                for dx in range(fill_width):
+                    if 0 <= y + dy < img.shape[0] and 0 <= x + dx < img.shape[1]:
+                        img[y + dy, x + dx] = color
+
+    def _draw_performance_stats(self, img, fps, latency_ms, y):
+        """Draw FPS and latency stats."""
+        fps_text = f"FPS: {fps:.1f}"
+        lat_text = f"Latency: {latency_ms:.0f}ms"
+        for i, c in enumerate(fps_text):
+            tx = 10 + i * 7
+            if 0 <= y < img.shape[0] and 0 <= tx < img.shape[1]:
+                img[y, tx] = (100, 255, 100)
+        for i, c in enumerate(lat_text):
+            tx = 10 + i * 7
+            if 0 <= y + 20 < img.shape[0] and 0 <= tx < img.shape[1]:
+                img[y + 20, tx] = (100, 100, 255)
+
+    def get_performance_stats(self):
+        """Get current performance statistics."""
+        avg_fps = float(np.mean(self.fps_history)) if self.fps_history else 0.0
+        return {
+            "fps": avg_fps,
+            "total_frames": self.total_frames,
+            "avg_latency_ms": (self.total_processing_time / self.total_frames * 1000)
+                if self.total_frames > 0 else 0,
+        }
+
+    def reset(self):
+        """Reset state tracking."""
+        self.current_overlay = None
+        self.frame_buffer = []
         self.fps_history = []
-        self.last_frame_time = 0.0
-
-
-class ScreenCapture:
-    """Screen capture module for live gameplay.
-
-    Captures the Clash Royale game window and provides
-    preprocessed frames for the neural network.
-    """
-
-    def __init__(self, config: Optional[dict] = None):
-        """Initialize screen capture.
-
-        Args:
-            config: Screen capture configuration.
-        """
-        self.config = config or {}
-        self.target_window = self.config.get("screen_capture", {}).get(
-            "target_window", "Clash Royale"
-        )
-        self.capture_method = self.config.get("screen_capture", {}).get(
-            "capture_method", "mss"
-        )
-        self.resolution = tuple(
-            self.config.get("screen_capture", {}).get("resolution", [1280, 720])
-        )
-        self.target_resolution = tuple(
-            self.config.get("screen_capture", {}).get("target_resolution", [256, 256])
-        )
-        self.frame_rate = self.config.get("screen_capture", {}).get("frame_rate", 15)
-
-        self.is_capturing = False
-        self.frame_count = 0
-        self.last_capture_time = 0.0
-
-    def start(self) -> bool:
-        """Start screen capture.
-
-        Returns:
-            True if capture started successfully.
-        """
-        try:
-            if self.capture_method == "mss":
-                import mss
-                self.sct = mss.mss()
-            elif self.capture_method == "pyautogui":
-                import pyautogui
-                self.pyautogui = pyautogui
-            elif self.capture_method == "dxcam":
-                from dxcam import DXCam
-                self.camera = DXCam()
-            else:
-                logger.error(f"Unknown capture method: {self.capture_method}")
-                return False
-
-            self.is_capturing = True
-            logger.info(f"Started screen capture: {self.capture_method}")
-            return True
-        except ImportError as e:
-            logger.error(f"Missing dependency for {self.capture_method}: {e}")
-            return False
-
-    def stop(self) -> None:
-        """Stop screen capture."""
-        self.is_capturing = False
-        logger.info("Stopped screen capture")
-
-    def capture_frame(self) -> Optional[np.ndarray]:
-        """Capture a single frame from the game window.
-
-        Returns:
-            Captured frame as numpy array, or None if capture failed.
-        """
-        if not self.is_capturing:
-            return None
-
-        # Capture timestamp for FPS
-        import time
-        now = time.time()
-        self.frame_count += 1
-
-        # Capture frame (method-specific)
-        if self.capture_method == "mss":
-            try:
-                monitor = {"left": 0, "top": 0, "width": self.resolution[0],
-                          "height": self.resolution[1]}
-                screenshot = self.sct.grab(monitor)
-                frame = np.array(screenshot)
-                # Convert BGRA to RGB
-                frame = frame[:, :, :3]
-            except Exception as e:
-                logger.error(f"Capture error: {e}")
-                return None
-
-        elif self.capture_method == "pyautogui":
-            try:
-                frame = self.pyautogui.screenshot(
-                    region=(0, 0, self.resolution[0], self.resolution[1])
-                )
-                frame = np.array(frame)
-                frame = frame[:, :, ::-1]  # RGB to BGR
-            except Exception as e:
-                logger.error(f"Capture error: {e}")
-                return None
-
-        else:
-            logger.warning(f"Capture method {self.capture_method} not implemented")
-            return None
-
-        # Resize to target resolution
-        if frame.shape[:2] != self.target_resolution:
-            frame = self._resize_frame(frame)
-
-        self.last_capture_time = now
-        return frame
-
-    def _resize_frame(self, frame: np.ndarray) -> np.ndarray:
-        """Resize frame to target resolution using nearest neighbor."""
-        h, w = frame.shape[:2]
-        th, tw = self.target_resolution
-
-        # Simple nearest-neighbor resize
-        scale_x = w / tw
-        scale_y = h / th
-
-        resized = np.zeros((th, tw, frame.shape[2]), dtype=frame.dtype)
-        for y in range(th):
-            for x in range(tw):
-                src_y = min(int(y * scale_y), h - 1)
-                src_x = min(int(x * scale_x), w - 1)
-                resized[y, x] = frame[src_y, src_x]
-
-        return resized
+        self._last_frame_time = 0.0
+        self.total_frames = 0
+        self.total_processing_time = 0.0
