@@ -39,8 +39,12 @@ import time
 from pathlib import Path
 from typing import Optional
 
+import numpy as np
+
 # Add parent directory to path
 sys.path.insert(0, str(Path(__file__).parent.parent))
+
+from src.serialization import load_checkpoint  # noqa: E402
 
 logger = logging.getLogger("crp")
 
@@ -113,7 +117,7 @@ def cmd_tournament(args: argparse.Namespace) -> int:
     # Load population
     population_path = Path(args.population)
     import torch
-    checkpoint = torch.load(str(population_path), map_location="cpu")
+    checkpoint = load_checkpoint(str(population_path))
 
     if isinstance(checkpoint, dict) and "agents" in checkpoint:
         weights_list = [np.array(a["weights"]) for a in checkpoint["agents"]]
@@ -217,7 +221,7 @@ def cmd_export(args: argparse.Namespace) -> int:
     # Load model
     model_path = Path(args.model)
     import torch
-    checkpoint = torch.load(str(model_path), map_location="cpu")
+    checkpoint = load_checkpoint(str(model_path))
 
     if isinstance(checkpoint, dict) and "weights" in checkpoint:
         weights = np.array(checkpoint["weights"])
@@ -456,7 +460,7 @@ def cmd_benchmark(args: argparse.Namespace) -> int:
     # Load model
     model_path = Path(args.model)
     import torch
-    checkpoint = torch.load(str(model_path), map_location="cpu")
+    checkpoint = load_checkpoint(str(model_path))
 
     if isinstance(checkpoint, dict) and "weights" in checkpoint:
         weights = np.array(checkpoint["weights"])

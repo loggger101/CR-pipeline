@@ -28,12 +28,14 @@ from pathlib import Path
 from typing import Callable, Dict, List, Optional, Tuple
 
 import numpy as np
+import torch
 import yaml
 
 from ..models import (
     Population, AgentRecord, EvolutionStrategy, EvolutionConfig,
 )
 from ..env.sim import ParallelRunner, MatchResult, CARD_DEFS
+from ..serialization import load_agent_genome, load_checkpoint
 from ..alerting import AlertManager, AlertRule, AlertType, AlertLevel
 from ..registry import ModelRegistry, ModelStage
 from .monitoring import MetricsCollector, BottleneckDetector, MonitoringConfig
@@ -134,6 +136,13 @@ class TrainingConfig:
     save_full_history: bool = True
     runs_dir: str = "runs"
     resume_from: Optional[str] = None
+    # When resuming, train this many *further* generations instead of treating
+    # max_generations as an absolute target the run may already have passed.
+    additional_generations: Optional[int] = None
+    # Agent checkpoints to seed a new population from. The genomes are kept
+    # intact and the rest of the population is filled with mutated copies.
+    seed_agents: Optional[List[str]] = None
+    seed_mutation_std: float = 0.08
     seed: int = 42
     diversity_preservation: bool = False
     diversity_threshold: float = 0.5
@@ -209,6 +218,9 @@ class TrainingConfig:
             "save_full_history": self.save_full_history,
             "runs_dir": self.runs_dir,
             "resume_from": self.resume_from,
+            "additional_generations": self.additional_generations,
+            "seed_agents": list(self.seed_agents) if self.seed_agents else None,
+            "seed_mutation_std": self.seed_mutation_std,
             "seed": self.seed,
             "diversity_preservation": self.diversity_preservation,
             "diversity_threshold": self.diversity_threshold,
@@ -422,10 +434,13 @@ class EvolutionTrainer:
         self.running = True
         self._start_time = time.time()
 
-        # Initialize or resume
-        if self.config.resume_from and os.path.exists(self.config.resume_from):
+        # Continue a previous run, start from chosen agents, or start fresh.
+        if self.config.resume_from:
             self._resume_from_checkpoint()
-            logger.info(f"Resumed from checkpoint at generation {self.generation}")
+            logger.info("Resumed at generation %d, training through %d",
+                        self.generation, self.config.max_generations)
+        elif self.config.seed_agents:
+            self._seed_population_from_agents(self.config.seed_agents)
         else:
             self.population.initialize(seed=self.config.seed)
             logger.info("Initialized new population")
@@ -981,9 +996,11 @@ class EvolutionTrainer:
         gen_dir = self.runs_dir / f"gen_{gen + 1:04d}"
         gen_dir.mkdir(parents=True, exist_ok=True)
 
-        # Save population
+        # Save population, and the trainer state resume needs beside it.
         pop_path = gen_dir / "population.pt"
+        self.population.generation = gen + 1
         self.population.save_checkpoint(str(pop_path))
+        self._save_trainer_state(gen_dir)
 
         # Save config
         config_path = gen_dir / "config.json"
@@ -1078,33 +1095,165 @@ class EvolutionTrainer:
             f"Time: {elapsed:.1f}s"
         )
 
+    def _seed_population_from_agents(self, paths: List[str]) -> None:
+        """Start a new population from agents the user picked.
+
+        The chosen genomes are kept intact so nothing that was already learned
+        is thrown away, and the remaining slots are filled with mutated copies
+        to give selection something to work with. Seeding with identical copies
+        would leave the population with no variation to select on.
+
+        Args:
+            paths: Agent checkpoint files.
+
+        Raises:
+            ValueError: if no usable genome could be read.
+        """
+        genomes = []
+        for path in paths:
+            genomes.append(load_agent_genome(path))
+            logger.info("Seeding from %s", path)
+
+        if not genomes:
+            raise ValueError("No agents supplied to seed the population from")
+
+        rng = np.random.RandomState(self.config.seed)
+        self.population.initialize(seed=self.config.seed)
+
+        size = len(self.population.get_population_weights())
+        seeded = []
+        for index in range(size):
+            base = genomes[index % len(genomes)]
+            if index < len(genomes):
+                seeded.append(np.array(base, copy=True))   # keep originals
+            else:
+                seeded.append(np.asarray(base)
+                              + rng.randn(base.size) * self.config.seed_mutation_std)
+        self.population.set_population_weights(seeded)
+
+        logger.info("Seeded %d agents from %d checkpoint(s); "
+                    "%d mutated copies (std %.3f)",
+                    size, len(genomes), size - len(genomes),
+                    self.config.seed_mutation_std)
+
+    @staticmethod
+    def find_population_checkpoint(source: str) -> Optional[Path]:
+        """Locate a population checkpoint from a run directory or a file path.
+
+        Accepts the population file itself, a ``gen_XXXX`` folder, or a run
+        directory (in which case the latest generation is used), so callers can
+        hand over whatever they happen to have.
+        """
+        path = Path(source)
+        if path.is_file():
+            return path
+        if path.is_dir():
+            direct = path / "population.pt"
+            if direct.is_file():
+                return direct
+            generations = sorted(path.glob("gen_*/population.pt"))
+            if generations:
+                return generations[-1]
+        return None
+
     def _resume_from_checkpoint(self) -> None:
-        """Resume training from a saved checkpoint."""
+        """Restore population and training state from a previous run.
+
+        Resuming used to load only the genomes: the generation counter, best
+        agent, hall of fame and ELO ratings were all lost, and the saved config
+        replaced the caller's, so asking to continue for more generations was
+        silently discarded. Everything needed to carry on is restored here, and
+        the *current* config is kept so the caller can change how much further
+        to train.
+        """
         if not self.config.resume_from:
             return
 
-        # Load population
-        self.population.load_checkpoint(self.config.resume_from)
+        checkpoint_path = self.find_population_checkpoint(self.config.resume_from)
+        if checkpoint_path is None:
+            raise FileNotFoundError(
+                f"No population checkpoint found at {self.config.resume_from!r}. "
+                f"Point resume_from at a run directory, a gen_XXXX folder, or a "
+                f"population.pt file."
+            )
 
-        # Find the best generation directory for config
-        gen_dirs = sorted(self.runs_dir.glob("gen_*"), reverse=True)
-        if gen_dirs:
-            config_path = gen_dirs[0] / "config.json"
-            if config_path.exists():
-                with open(config_path) as f:
-                    saved_config = json.load(f)
-                self.config = TrainingConfig.from_dict(saved_config)
-
+        self.population.load_checkpoint(str(checkpoint_path))
         self.generation = self.population.generation
+        logger.info("Resumed population of %d from %s (generation %d)",
+                    len(self.population), checkpoint_path, self.generation)
 
-        # Find best agent
-        best_dir = self.runs_dir / "best"
-        if best_dir.exists():
-            meta_path = best_dir / "metadata.json"
+        # Trainer-side state lives beside the population checkpoint.
+        state_path = checkpoint_path.parent / "trainer_state.pt"
+        if state_path.exists():
+            self._load_trainer_state(state_path)
+        else:
+            # Older checkpoints predate trainer_state; recover what we can.
+            meta_path = checkpoint_path.parent.parent / "best" / "metadata.json"
             if meta_path.exists():
-                with open(meta_path) as f:
-                    meta = json.load(f)
-                self.best_fitness = meta["fitness"]
+                try:
+                    with open(meta_path) as handle:
+                        self.best_fitness = json.load(handle).get(
+                            "fitness", self.best_fitness)
+                except (OSError, ValueError):
+                    pass
+            logger.info("No trainer_state.pt beside the checkpoint; hall of "
+                        "fame and ELO ratings start fresh.")
+
+        # Continue for a further N generations when asked, rather than
+        # treating max_generations as an absolute target that may already
+        # have been passed.
+        if self.config.additional_generations:
+            self.config.max_generations = (
+                self.generation + self.config.additional_generations)
+        if self.config.max_generations <= self.generation:
+            raise ValueError(
+                f"This run already reached generation {self.generation}; "
+                f"max_generations={self.config.max_generations} leaves nothing "
+                f"to do. Set additional_generations to continue."
+            )
+
+    def _load_trainer_state(self, path: Path) -> None:
+        """Restore hall of fame, ELO ratings and best-agent tracking."""
+        state = load_checkpoint(str(path))
+        self.best_fitness = state.get("best_fitness", self.best_fitness)
+        self.best_generation = state.get("best_generation", 0)
+        self.best_agent_id = state.get("best_agent_id")
+        best_genome = state.get("best_genome")
+        if best_genome is not None:
+            self.best_genome = np.asarray(best_genome)
+        self.elo_ratings = dict(state.get("elo_ratings", {}))
+        self.elo_history = {k: list(v)
+                            for k, v in state.get("elo_history", {}).items()}
+        self.hall_of_fame = [
+            (np.asarray(genome), dict(meta))
+            for genome, meta in state.get("hall_of_fame", [])
+        ]
+        history = state.get("fitness_history")
+        if isinstance(history, dict):
+            self.population.fitness_history = {k: list(v)
+                                               for k, v in history.items()}
+        logger.info("Restored trainer state: best %.1f at generation %d, "
+                    "%d hall-of-fame champions, %d rated agents",
+                    self.best_fitness, self.best_generation,
+                    len(self.hall_of_fame), len(self.elo_ratings))
+
+    def _save_trainer_state(self, directory: Path) -> None:
+        """Persist the state resume needs alongside a population checkpoint."""
+        payload = {
+            "best_fitness": self.best_fitness,
+            "best_generation": self.best_generation,
+            "best_agent_id": self.best_agent_id,
+            "best_genome": (None if self.best_genome is None
+                            else np.asarray(self.best_genome)),
+            "elo_ratings": dict(self.elo_ratings),
+            "elo_history": {k: list(v) for k, v in self.elo_history.items()},
+            "hall_of_fame": [(np.asarray(g), dict(m))
+                             for g, m in self.hall_of_fame],
+            "fitness_history": {k: list(v) for k, v
+                                in self.population.fitness_history.items()},
+            "tournament_mode": self.tournament_mode,
+        }
+        torch.save(payload, str(directory / "trainer_state.pt"))
 
     def get_training_status(self) -> Dict:
         """Get current training status.
@@ -1129,5 +1278,15 @@ class EvolutionTrainer:
         }
 
     def __del__(self) -> None:
-        """Clean up resources."""
-        self.runner.shutdown()
+        """Best-effort cleanup for trainers that were never closed.
+
+        Reached during interpreter shutdown and after a failed __init__, when
+        attributes may be missing entirely -- the previous unconditional
+        ``self.runner.shutdown()`` raised AttributeError and printed a
+        traceback every time a config was rejected. Prefer ``close()`` or the
+        context manager; this is only a backstop.
+        """
+        try:
+            self.close()
+        except Exception:
+            pass

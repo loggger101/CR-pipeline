@@ -51,11 +51,12 @@ from src.models import (
     Population,
     TournamentEvolutionStrategy,
 )
+from src.serialization import load_checkpoint
 
 
 def load_population_weights(path: str) -> list:
     """Load weights from a checkpoint file."""
-    checkpoint = torch.load(path, map_location="cpu")
+    checkpoint = load_checkpoint(path)
     if isinstance(checkpoint, dict) and "agents" in checkpoint:
         return [np.array(a["weights"]) for a in checkpoint["agents"]]
     elif isinstance(checkpoint, dict) and "weights" in checkpoint:
@@ -99,7 +100,7 @@ def load_checkpoint(runs_dir: str) -> Optional[dict]:
     """Load the latest tournament checkpoint."""
     latest_path = Path(runs_dir) / "tournament_checkpoints" / "latest.pt"
     if latest_path.exists():
-        return torch.load(str(latest_path), map_location="cpu")
+        return load_checkpoint(str(latest_path))
     return None
 
 
