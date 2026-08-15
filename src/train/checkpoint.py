@@ -18,6 +18,8 @@ from typing import Dict, List, Optional
 import numpy as np
 import torch
 
+from ..serialization import load_checkpoint
+
 logger = logging.getLogger(__name__)
 
 
@@ -143,7 +145,7 @@ class CheckpointManager:
 
         # Load weights
         weights_path = gen_dir / "population.pt"
-        checkpoint = torch.load(weights_path)
+        checkpoint = load_checkpoint(str(weights_path))
         weights = [np.array(w) for w in checkpoint["weights"]]
 
         # Load history
@@ -175,7 +177,7 @@ class CheckpointManager:
         if not weights_path.exists():
             return None
 
-        checkpoint = torch.load(weights_path)
+        checkpoint = load_checkpoint(str(weights_path))
         return {
             "weights": np.array(checkpoint["weights"]),
             "fitness": checkpoint["fitness"],

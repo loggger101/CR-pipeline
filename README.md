@@ -211,6 +211,38 @@ python scripts/crp_gui.py
 Each run gets its own timestamped folder under `runs/`, and a finished run
 hands its best agent straight to the Watch and Agents tabs.
 
+### Continuing from earlier work
+
+The **Start from** control at the top of the Train tab decides where a run's
+population comes from:
+
+| Start from | What happens |
+|---|---|
+| **Fresh population** | Random genomes, as usual. |
+| **Continue a previous run** | Picks up exactly where that run stopped — same population, generation counter, hall of fame and ELO ratings. "Generations" becomes *extra* generations, and the run writes back into its own folder so its history stays in one piece. |
+| **Start from chosen agents** | Pick one or more `.pt` agents — from an earlier run or copied in from anywhere. Those genomes go into the population unchanged and the remaining slots are filled with mutated copies, so nothing already learned is thrown away but there is still variation to select on. |
+
+The same thing from Python:
+
+```python
+# Continue a run for 50 more generations
+config = TrainingConfig(runs_dir="runs/run_20260814_120000",
+                        resume_from="runs/run_20260814_120000",
+                        additional_generations=50)
+
+# Or start a new run from agents you liked
+config = TrainingConfig(runs_dir="runs/my_new_run",
+                        seed_agents=["runs/run_a/best/best_agent.pt",
+                                     "downloaded_champion.pt"],
+                        seed_mutation_std=0.08,
+                        max_generations=100)
+```
+
+`resume_from` accepts a run directory, a `gen_XXXX` folder, or a
+`population.pt` file — the latest checkpoint is used when given a directory.
+Resuming needs a checkpoint, so keep `checkpoint_interval` at a value that
+actually fires during your run.
+
 Training runs on a worker thread, so the window stays responsive; **Stop** ends
 the run cleanly after the current generation rather than killing it mid-tournament.
 
@@ -847,8 +879,9 @@ pytest tests/test_integration.py -v
 pytest tests/ --cov=src --cov-report=html
 ```
 
-**Test coverage: 412 tests** across simulation engine, evolution strategies,
-tournament system, desktop UI, visualization, and integration.
+**Test coverage: 436 tests** across simulation engine, evolution strategies,
+tournament system, checkpoint/resume, desktop UI, visualization, and
+integration.
 
 Several suites are worth calling out because they guard against silent failure
 rather than crashes — the failure mode where everything is green and nothing is
@@ -867,6 +900,9 @@ learned:
 - **`tests/test_persistence.py`** — a trained agent survives save/load and
   plays identically afterwards. Saving the wrong parameter set loses a training
   run without raising anything.
+- **`tests/test_resume.py`** — continuing a run really does carry the
+  population, generation counter, hall of fame and ratings, and seeding keeps
+  the chosen agents intact.
 - **`tests/test_opponents.py`** — baselines play legally, respond to pushes,
   and remain in a band where untrained agents neither dominate nor are shut
   out.

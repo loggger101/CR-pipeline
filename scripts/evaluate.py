@@ -2,12 +2,12 @@
 """Evaluate trained agents in CR-Pipeline.
 
 Usage:
-    python scripts/evaluate.py [--checkpoint runs/best/weights.pt] [--matches 20] [--opponent random|greedy|elite] [--tournament]
+    python scripts/evaluate.py --checkpoint runs/<run>/best/best_agent.pt [--matches 20] [--opponent all] [--tournament]
 
 Options:
     --checkpoint    Path to agent weights to evaluate
     --matches       Number of matches to play
-    --opponent      Opponent type: random, greedy, elite
+    --opponent      random, greedy, balanced, aggressive, defensive, or all
     --tournament    Run tournament mode against population
     --population    Path to population checkpoint for tournament
 """
@@ -24,7 +24,11 @@ import torch
 
 from src.train import FitnessEvaluator
 from src.env.sim import SimulationEngine
+from src.env.sim.parallel_runner import _OPPONENT_ACTIONS
 from src.models.policy import DEFAULT_POLICY_SPEC
+from src.serialization import load_checkpoint as _load_ckpt_file
+
+SCRIPTED_OPPONENTS = sorted(_OPPONENT_ACTIONS)
 
 
 def load_checkpoint(path: str) -> np.ndarray:
@@ -73,9 +77,9 @@ def main():
                        help="Path to population checkpoint for tournament")
     parser.add_argument("--matches", type=int, default=20,
                        help="Number of matches per agent")
-    parser.add_argument("--opponent", type=str, default="random",
-                       choices=["random", "greedy", "elite"],
-                       help="Opponent type")
+    parser.add_argument("--opponent", type=str, default="all",
+                       choices=SCRIPTED_OPPONENTS + ["all"],
+                       help="Opponent to play, or 'all' for every baseline")
     parser.add_argument("--tournament", action="store_true",
                        help="Run tournament mode")
     parser.add_argument("--seed", type=int, default=42,
@@ -99,8 +103,9 @@ def main():
             logger.error("--population is required for tournament mode")
             return
 
-        # Load population
-        checkpoint = torch.load(args.population, map_location="cpu")
+        # Load population. This is the raw file loader, not this module's
+        # load_checkpoint, which returns a single agent's genome.
+        checkpoint = _load_ckpt_file(args.population)
         weights_list = [np.array(w) for w in checkpoint["weights"]]
 
         logger.info(f"Running tournament with {len(weights_list)} agents...")
@@ -124,16 +129,21 @@ def main():
         logger.info(f"Evaluating agent from {args.checkpoint}")
         weights = load_checkpoint(args.checkpoint)
 
-        # Evaluate against different opponent types
-        for opp_type in ["random", "greedy"]:
-            result = evaluator.evaluate_single(
+        # Honour --opponent. This previously hardcoded random/greedy and
+        # ignored the flag entirely.
+        opponents = (SCRIPTED_OPPONENTS if args.opponent == "all"
+                     else [args.opponent])
+        for opp_type in opponents:
+            result = evaluator.evaluate_against_opponent(
                 weights=weights,
                 matches=args.matches,
                 opponent_type=opp_type,
                 seed=args.seed,
             )
-            logger.info(f"vs {opp_type}: fitness={result.fitness:.3f} "
-                       f"(W={result.wins}, D={result.draws}, L={result.losses})")
+            played = max(1, result.wins + result.draws + result.losses)
+            logger.info(f"vs {opp_type:11s} W={result.wins} D={result.draws} "
+                        f"L={result.losses}  ({result.wins / played:.0%} wins)  "
+                        f"fitness={result.fitness:.3f}")
 
     else:
         logger.error("Specify --checkpoint or --tournament")

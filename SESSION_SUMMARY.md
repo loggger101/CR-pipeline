@@ -308,6 +308,61 @@ suite had been stepping around:
 
 ---
 
+---
+
+## Round five: continuing training, and a readiness pass
+
+### Continue from earlier work
+
+Two ways, both in the Train tab's **Start from** control and in
+`TrainingConfig`:
+
+- **Continue a previous run** (`resume_from` + `additional_generations`) —
+  picks up the population, generation counter, hall of fame and ELO ratings,
+  and writes back into the same run folder.
+- **Start from chosen agents** (`seed_agents`) — the picked genomes go into the
+  population unchanged, remaining slots are filled with mutated copies
+  (`seed_mutation_std`). Copying the seed into every slot would leave selection
+  nothing to choose between.
+
+`resume_from` accepts a run directory, a `gen_XXXX` folder, or a
+`population.pt` file.
+
+### Resume had never worked
+
+- `Population.load_checkpoint` called `torch.load(path)`. PyTorch 2.6 flipped
+  `weights_only` to True, and these checkpoints hold NumPy arrays, so loading
+  raised `UnpicklingError` outright. **Ten call sites** across the trainer, CLI
+  and scripts had the same defect; they now share
+  `src/serialization.load_checkpoint`, which documents why full unpickling is
+  correct for our own files.
+- What little did load threw away the generation counter, hall of fame and ELO
+  ratings, and replaced the caller's config with the saved one — so asking to
+  continue for more generations was silently discarded. Trainer state is now
+  written beside each population checkpoint and restored on resume.
+
+### Readiness pass findings
+
+Running the documented commands for real turned up three more:
+
+- **`crp export` crashed** with `NameError: name 'np' is not defined` — numpy
+  was never imported in `scripts/crp.py`. The documented export command had
+  never worked.
+- **`evaluate.py --opponent` was fiction**: its choices were
+  `random, greedy, elite` ("elite" is not an opponent, and balanced/aggressive/
+  defensive were missing), and the flag was ignored anyway because the code
+  hardcoded its own list. It also called `evaluate_single`, which does not
+  exist on `FitnessEvaluator`.
+- **`EvolutionTrainer.__del__` raised** `AttributeError` whenever construction
+  failed before `self.runner` was set, printing a traceback on every rejected
+  config.
+
+Everything else checked out: 35 entry points, all CLI subcommands, config
+parsing, the 140-card registry, model export, and a full
+train → save → continue → seed round trip.
+
+---
+
 ## Where to pick up
 
 1. **The frozen build is heavy.** PyTorch dominates the bundle. If size

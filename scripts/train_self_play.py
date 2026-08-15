@@ -28,12 +28,13 @@ sys.path.insert(0, str(Path(__file__).parent.parent))
 
 from src.train import EvolutionTrainer, TrainingConfig, HyperparamsLoader, PHASE_CONFIGS
 from src.env.sim import SimulationEngine
+from src.serialization import load_checkpoint
 import numpy as np
 import torch
 
 
 def load_population_weights(path: str) -> list:
-    checkpoint = torch.load(path, map_location="cpu")
+    checkpoint = load_checkpoint(path)
     if isinstance(checkpoint, dict) and "agents" in checkpoint:
         return [np.array(a["weights"]) for a in checkpoint["agents"]]
     elif isinstance(checkpoint, dict) and "weights" in checkpoint:

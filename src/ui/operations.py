@@ -20,6 +20,7 @@ from ..env.sim.parallel_runner import (
     _run_head_to_head, _run_matches,
 )
 from ..models.policy import DEFAULT_POLICY_SPEC
+from ..serialization import load_agent_genome as _load_agent_genome
 from ..train.trainer import EvolutionTrainer, TrainingConfig
 from .arena_canvas import snapshot_from_engine
 from .jobs import JobContext
@@ -27,6 +28,12 @@ from .jobs import JobContext
 TOURNAMENT_FORMATS = ["swiss", "round_robin", "single_elim", "double_elim", "league"]
 SCRIPTED_OPPONENTS = sorted(_OPPONENT_ACTIONS)
 MATCH_DURATIONS = ["short", "full", "overtime"]
+
+# How a run's population starts.
+START_FRESH = "Fresh population"
+START_CONTINUE = "Continue a previous run"
+START_SEED = "Start from chosen agents"
+START_MODES = [START_FRESH, START_CONTINUE, START_SEED]
 
 
 # ---------------------------------------------------------------------------
@@ -43,6 +50,21 @@ def resolve_runs_dir(project_root: str, runs_dir: Optional[str] = None) -> str:
     target = Path(runs_dir) if runs_dir else Path(project_root) / "runs"
     target.mkdir(parents=True, exist_ok=True)
     return str(target)
+
+
+def run_dir_for_resume(source: str) -> str:
+    """The run directory a resume source belongs to.
+
+    Continuing a run writes back into it, so its history, checkpoints and best
+    agent stay in one place rather than being split across directories. The
+    source may be the run folder, a ``gen_XXXX`` folder, or a population file.
+    """
+    path = Path(source)
+    if path.is_file():
+        path = path.parent
+    if path.name.startswith("gen_"):
+        path = path.parent
+    return str(path)
 
 
 def new_run_dir(runs_root: str, label: str = "run") -> str:
@@ -99,10 +121,45 @@ def build_training_config(values: Dict[str, Any], runs_dir: str) -> TrainingConf
     if duration not in MATCH_DURATIONS:
         raise ValueError(f"unknown match duration {duration!r}")
 
+    # How the population starts: fresh, continuing a run, or seeded from
+    # chosen agents.
+    start_mode = str(values.get("start_mode", START_FRESH))
+    if start_mode not in START_MODES:
+        raise ValueError(f"unknown start mode {start_mode!r}")
+
+    resume_from = None
+    seed_agents = None
+    additional = None
+    generations = as_int("max_generations")
+
+    if start_mode == START_CONTINUE:
+        source = str(values.get("resume_from") or "").strip()
+        if not source:
+            raise ValueError("choose a run to continue")
+        if EvolutionTrainer.find_population_checkpoint(source) is None:
+            raise ValueError(
+                f"no saved population found in {Path(source).name!r}; that run "
+                f"has no checkpoints to continue from"
+            )
+        resume_from = source
+        # Generations means "this many more" when continuing.
+        additional = generations
+
+    elif start_mode == START_SEED:
+        agents = [p for p in (values.get("seed_agents") or []) if p]
+        if not agents:
+            raise ValueError("choose at least one agent to start from")
+        for path in agents:
+            load_agent_genome(path)   # fail now, with a clear message
+        seed_agents = agents
+
     return TrainingConfig(
         population_size=population,
         elite_count=elite,
-        max_generations=as_int("max_generations"),
+        max_generations=generations,
+        additional_generations=additional,
+        resume_from=resume_from,
+        seed_agents=seed_agents,
         num_workers=as_int("num_workers"),
         seed=as_int("seed", 0),
         tournament_mode=bool(values.get("tournament_mode", True)),
@@ -227,34 +284,9 @@ def play_match(ctx: JobContext, genome: np.ndarray,
 # Agent evaluation
 # ---------------------------------------------------------------------------
 
-def load_agent_genome(path: str) -> np.ndarray:
-    """Load a policy genome from an agent checkpoint.
-
-    Raises:
-        ValueError: if the file holds Torch network parameters instead, which
-            the simulator cannot play.
-    """
-    import torch
-
-    payload = torch.load(path, map_location="cpu", weights_only=False)
-    if not isinstance(payload, dict):
-        genome = np.asarray(payload)
-    else:
-        raw = payload.get("genome")
-        if raw is None:
-            raw = payload.get("weights")
-        if raw is None:
-            raise ValueError("checkpoint contains no agent parameters")
-        genome = np.asarray(raw)
-
-    expected = DEFAULT_POLICY_SPEC.num_params
-    if genome.size != expected:
-        raise ValueError(
-            f"checkpoint holds {genome.size} parameters but the simulator "
-            f"plays {expected}-parameter policies; this looks like a Torch "
-            f"network checkpoint rather than an evolved agent"
-        )
-    return genome
+# Re-exported so the UI keeps one import surface; the implementation is shared
+# with the trainer, which seeds populations from the same files.
+load_agent_genome = _load_agent_genome
 
 
 def evaluate_against_scripted(ctx: JobContext, genome: np.ndarray,
