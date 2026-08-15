@@ -402,6 +402,19 @@ At 16 agents, Swiss reproduces the full round-robin ranking with a rank
 correlation of **+0.83** at ~5× less compute — and every entrant plays the same
 number of games, so standings stay comparable.
 
+### Reading progress: watch ratings, not fitness
+
+Tournament fitness is points per match inside a closed field, so **its mean sits
+near 0.5 no matter how strong the population gets**. A flat fitness curve in
+tournament mode is arithmetic, not a stalled run.
+
+What moves is rating against the hall of fame. As the population outgrows its
+former champions, those champions' ELO falls relative to the field — in one
+real 61-generation run, `hof_gen0` drifted from 1483 down to 1441 while mean
+fitness barely changed. The Train tab charts champion ELO and past-champion
+ELO for exactly this reason, and progress snapshots carry `population_elo` and
+`hall_of_fame_elo`.
+
 ### The hall of fame anchors progress
 
 Tournament fitness is *relative to the current field*. On its own it can rise
@@ -879,9 +892,9 @@ pytest tests/test_integration.py -v
 pytest tests/ --cov=src --cov-report=html
 ```
 
-**Test coverage: 436 tests** across simulation engine, evolution strategies,
-tournament system, checkpoint/resume, desktop UI, visualization, and
-integration.
+**Test coverage: 453 tests** across simulation engine, evolution strategies,
+tournament system, checkpoint/resume, run artifacts, desktop UI,
+visualization, and integration.
 
 Several suites are worth calling out because they guard against silent failure
 rather than crashes — the failure mode where everything is green and nothing is
@@ -903,6 +916,10 @@ learned:
 - **`tests/test_resume.py`** — continuing a run really does carry the
   population, generation counter, hall of fame and ratings, and seeding keeps
   the chosen agents intact.
+- **`tests/test_run_artifacts.py`** — what a finished run leaves on disk: a
+  small agent checkpoint, a checkpoint you can actually resume from, a
+  non-empty log, and metrics that describe the run that happened. Every case
+  came from inspecting real runs, not from reading code.
 - **`tests/test_opponents.py`** — baselines play legally, respond to pushes,
   and remain in a band where untrained agents neither dominate nor are shut
   out.

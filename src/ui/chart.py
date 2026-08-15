@@ -54,6 +54,10 @@ class LineChart(tk.Frame):
         if ylabel:
             axes.set_ylabel(ylabel, color=FOREGROUND, fontsize=9)
 
+    def set_labels(self, title: str, xlabel: str, ylabel: str) -> None:
+        """Retitle the chart; applied on the next :meth:`plot`."""
+        self._title, self._xlabel, self._ylabel = title, xlabel, ylabel
+
     def plot(self, series: Dict[str, Sequence[float]],
              x: Sequence[float] | None = None) -> None:
         """Replace the chart contents with ``series`` (name -> values)."""
