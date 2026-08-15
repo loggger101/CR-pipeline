@@ -34,7 +34,9 @@ import yaml
 from ..models import (
     Population, AgentRecord, EvolutionStrategy, EvolutionConfig,
 )
-from ..env.sim import ParallelRunner, MatchResult, CARD_DEFS
+from ..env.sim import (
+    ParallelRunner, MatchResult, CARD_DEFS, default_worker_count,
+)
 from ..serialization import load_agent_genome, load_checkpoint
 from ..alerting import AlertManager, AlertRule, AlertType, AlertLevel
 from ..registry import ModelRegistry, ModelStage
@@ -129,7 +131,9 @@ class TrainingConfig:
     early_stopping_min_improvement: float = 0.5
     checkpoint_interval: int = 10
     max_checkpoints: int = 50
-    num_workers: int = 4
+    # Sized to the machine rather than a fixed 4: matches are CPU-bound and
+    # independent, so leaving cores idle is throughput given away.
+    num_workers: int = field(default_factory=default_worker_count)
     batch_size: int = 50
     timeout: int = 300
     log_interval: int = 1
@@ -300,6 +304,16 @@ class EvolutionTrainer:
             )
         )
 
+        # One pool of worker processes serves the whole trainer. Tournament
+        # evaluation and scripted evaluation never run at the same time, and a
+        # pool per component meant 2-3x the requested workers were spawned --
+        # most of them idle, all of them holding a copy of the interpreter.
+        self.runner = ParallelRunner(
+            num_workers=config.num_workers,
+            timeout=config.timeout,
+        )
+        self.runner.start()
+
         # Tournament mode support
         self.tournament_mode = config.tournament_mode
         self.tournament_evaluator = None
@@ -310,8 +324,8 @@ class EvolutionTrainer:
             self.tournament_evaluator = FitnessEvaluator(
                 num_workers=config.num_workers,
                 matches_per_agent=config.tournament_matches,
+                runner=self.runner,
             )
-            self.tournament_evaluator.runner.start()
             self.tournament_strategy = TournamentEvolutionStrategy(
                 tournament_format=config.tournament_format,
                 matches_per_pair=config.tournament_matches,
@@ -319,12 +333,6 @@ class EvolutionTrainer:
                 seed=config.seed,
             )
             logger.info("Tournament mode enabled")
-
-        self.runner = ParallelRunner(
-            num_workers=config.num_workers,
-            timeout=config.timeout,
-        )
-        self.runner.start()
 
         # Training state
         self.generation = 0

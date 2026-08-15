@@ -34,7 +34,7 @@ from .state import (
     compute_state_from_arena, compute_enhanced_state,
 )
 from .parallel_runner import (
-    ParallelRunner, MatchResult, WorkerConfig,
+    ParallelRunner, MatchResult, WorkerConfig, default_worker_count,
 )
 
 __all__ = [
@@ -69,4 +69,5 @@ __all__ = [
     "ParallelRunner",
     "MatchResult",
     "WorkerConfig",
+    "default_worker_count",
 ]

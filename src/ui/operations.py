@@ -17,7 +17,7 @@ import numpy as np
 from ..env.sim.engine import SimulationEngine
 from ..env.sim.parallel_runner import (
     OPPONENT_PROFILES, WorkerConfig, _OPPONENT_ACTIONS, _policy_action,
-    _run_head_to_head, _run_matches,
+    _run_head_to_head, _run_matches, default_worker_count,
 )
 from ..models.policy import DEFAULT_POLICY_SPEC
 from ..serialization import load_agent_genome as _load_agent_genome

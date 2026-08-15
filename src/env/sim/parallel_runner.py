@@ -29,6 +29,14 @@ import numpy as np
 
 from .engine import SimulationEngine, SimulationStepResult, UnitState, UnitStatus, OpponentStrategy
 from .actions import Action, ActionType
+# Imported at module scope, not per call: both sit on the per-tick path, and
+# the import machinery for them was measurable in match profiles. ``entities``
+# is imported before this module by the package __init__, and ``models.policy``
+# does not import ``env.sim`` at module scope, so neither is a cycle.
+from .entities import CARD_DEFS
+from ...models.policy import (
+    DEFAULT_POLICY_SPEC, compile_genome, encode_features, policy_forward,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -88,26 +96,61 @@ class WorkerConfig:
     use_training_decks: bool = True
 
 
+def default_worker_count() -> int:
+    """Worker processes to use when the caller does not choose.
+
+    Matches are CPU-bound and independent, so the useful ceiling is the
+    logical core count; one core is left for the coordinating process (and,
+    in the desktop app, for the Tk event loop, which Windows will close the
+    window over if it stops being serviced).
+    """
+    cpus = os.cpu_count() or 4
+    return max(1, cpus - 1)
+
+
+def _init_worker() -> None:
+    """Prepare a freshly spawned worker process.
+
+    Each worker is already one of ~11 processes saturating the machine, so the
+    numeric libraries underneath must not each start their own thread pool as
+    well: the policy's matrices are 64x32, far too small to gain from threaded
+    BLAS, and the oversubscription costs real throughput. These are read at
+    library import time, so they are set before NumPy/Torch load in the child.
+    """
+    for name in ("OMP_NUM_THREADS", "MKL_NUM_THREADS", "OPENBLAS_NUM_THREADS",
+                 "NUMEXPR_NUM_THREADS", "VECLIB_MAXIMUM_THREADS"):
+        os.environ.setdefault(name, "1")
+
+    # Workers only ever run the NumPy policy and the simulation; nothing here
+    # touches the GPU, and a CUDA context per worker would cost VRAM for
+    # nothing.
+    os.environ.setdefault("CUDA_VISIBLE_DEVICES", "")
+
+
 def _get_card_def(card_name: str):
     """Get card definition by name."""
-    from .entities import CARD_DEFS
     return CARD_DEFS.get(card_name)
 
 
-def _affordable_slots(engine, side: str) -> np.ndarray:
-    """Boolean mask of hand slots that can legally be played right now."""
+def _affordable_slots(engine, side: str) -> List[bool]:
+    """Which hand slots can legally be played right now.
+
+    A plain list rather than a NumPy array: it holds four booleans, is only
+    ever indexed one element at a time, and allocating an array for it on
+    every tick cost more than the check itself.
+    """
     hand = engine.player_hand if side == "player" else engine.opponent_hand
     cooldowns = (engine.player_cooldowns if side == "player"
                  else engine.opponent_cooldowns)
     elixir = engine.player_elixir if side == "player" else engine.opponent_elixir
 
-    valid = np.zeros(len(hand), dtype=bool)
+    valid = []
     for i, card_name in enumerate(hand):
         if cooldowns[i] > 0:
+            valid.append(False)
             continue
-        card_def = _get_card_def(card_name)
-        if card_def is not None and elixir >= card_def.cost:
-            valid[i] = True
+        card_def = CARD_DEFS.get(card_name)
+        valid.append(card_def is not None and elixir >= card_def.cost)
     return valid
 
 
@@ -118,11 +161,14 @@ def _placement_to_arena(engine, placement, card_def, side: str):
     Coordinates are produced in engine space (row 0 is the opponent's back
     line) regardless of which side is acting.
     """
-    col = float(np.clip((placement[0] + 1.0) / 2.0 * (engine.GRID_COLS - 1),
-                        0, engine.GRID_COLS - 1))
+    # min/max on plain floats rather than np.clip: this runs on every tick,
+    # and np.clip on a scalar goes through the full array machinery.
+    max_col = float(engine.GRID_COLS - 1)
+    col = (float(placement[0]) + 1.0) / 2.0 * max_col
+    col = 0.0 if col < 0.0 else (max_col if col > max_col else col)
 
     is_spell = card_def is not None and card_def.card_type == "spell"
-    frac = (placement[1] + 1.0) / 2.0  # 0 = enemy back line, 1 = own back line
+    frac = (float(placement[1]) + 1.0) / 2.0  # 0 = enemy back line, 1 = own
 
     if is_spell:
         lo, hi = 0.0, float(engine.GRID_ROWS - 1)
@@ -137,7 +183,7 @@ def _placement_to_arena(engine, placement, card_def, side: str):
         # Mirror: the opponent's "forward" is increasing row.
         row = hi - frac * (hi - lo)
 
-    return col, float(np.clip(row, lo, hi))
+    return col, (lo if row < lo else (hi if row > hi else row))
 
 
 def _policy_action(genome, engine, side: str) -> Action:
@@ -150,26 +196,41 @@ def _policy_action(genome, engine, side: str) -> Action:
     Selection is deterministic given the genome and the engine state, so a
     given (genome, seed) pair always produces the same match. Exploration is
     the evolutionary operator's job, not the evaluator's.
+
+    Args:
+        genome: A flat genome, or the tuple from
+            :func:`~src.models.policy.compile_genome`. Callers that run a whole
+            match should compile once and pass the tuple: this runs on every
+            tick and re-slicing a fixed genome each time is wasted work.
+        engine: The live :class:`SimulationEngine`.
+        side: ``"player"`` or ``"opponent"``.
     """
     if genome is None:
         return Action.pass_action()
-
-    from ...models.policy import DEFAULT_POLICY_SPEC, encode_features, policy_forward
 
     valid = _affordable_slots(engine, side)
     features = encode_features(engine, side)
     card_logits, placement = policy_forward(genome, features, DEFAULT_POLICY_SPEC)
 
-    # Slot 4 is "pass" and is always available: holding elixir is a real move.
-    masked = card_logits.astype(np.float64).copy()
-    masked[:len(valid)][~valid] = -np.inf
+    # Highest logit among the playable slots. Slot 4 is "pass" and is always
+    # available: holding elixir is a real move. Scanning in index order and
+    # taking the first strict maximum matches the argmax-over-masked-array this
+    # replaces, without building a masked copy per tick.
+    choice = -1
+    best = 0.0
+    num_slots = len(valid)
+    for index in range(len(card_logits)):
+        if index < num_slots and not valid[index]:
+            continue
+        value = card_logits[index]
+        if choice < 0 or value > best:
+            choice, best = index, value
 
-    choice = int(np.argmax(masked))
-    if choice >= len(valid) or not valid[choice]:
+    if choice < 0 or choice >= num_slots:
         return Action.pass_action()
 
     hand = engine.player_hand if side == "player" else engine.opponent_hand
-    card_def = _get_card_def(hand[choice])
+    card_def = CARD_DEFS.get(hand[choice])
     col, row = _placement_to_arena(engine, placement, card_def, side)
 
     action_type = (ActionType.DEPLOY_SPELL
@@ -480,6 +541,11 @@ def _run_head_to_head(
         "agent2": {"wins": 0, "draws": 0, "losses": 0, "towers": 0, "duration": 0},
     }
 
+    # Unpack both genomes once for the whole matchup rather than on each of
+    # the several thousand ticks that follow.
+    agent1_policy = compile_genome(agent1_weights)
+    agent2_policy = compile_genome(agent2_weights)
+
     def play_block(bottom_key, bottom_genome, bottom_deck,
                    top_key, top_genome, top_deck, seed_base):
         """Run ``half_matches`` with the given agent on each side.
@@ -525,10 +591,10 @@ def _run_head_to_head(
             top["duration"] += engine.tick
 
     # Phase 1: agent1 on the bottom. Phase 2: agent2 on the bottom.
-    play_block("agent1", agent1_weights, deck,
-               "agent2", agent2_weights, opponent_deck, seed)
-    play_block("agent2", agent2_weights, opponent_deck,
-               "agent1", agent1_weights, deck, seed + 50000)
+    play_block("agent1", agent1_policy, deck,
+               "agent2", agent2_policy, opponent_deck, seed)
+    play_block("agent2", agent2_policy, opponent_deck,
+               "agent1", agent1_policy, deck, seed + 50000)
 
     agent1_wins, agent1_draws = stats["agent1"]["wins"], stats["agent1"]["draws"]
     agent1_losses, agent1_towers = stats["agent1"]["losses"], stats["agent1"]["towers"]
@@ -629,6 +695,10 @@ def _run_matches(
     opponent_fn = _OPPONENT_ACTIONS.get(opponent_type, _random_opponent_action)
     max_ticks = config.match_duration_ticks + config.overtime_ticks + 100
 
+    # Unpack once for every match this worker runs, not once per tick.
+    agent_policy = compile_genome(weights)
+    opponent_policy = compile_genome(opponent_weights)
+
     for match_idx in range(config.match_count):
         # Distinct seed per match (resetting with one seed replayed the same
         # game), but derived only from config.seed so that every agent in a
@@ -639,11 +709,11 @@ def _run_matches(
                              opponent_deck=match_decks[match_idx])
 
         while not engine.terminated:
-            agent_action = _select_agent_action(state, weights, engine,
-                                                opponent_type, opponent_weights)
+            agent_action = _select_agent_action(state, agent_policy, engine,
+                                                opponent_type, opponent_policy)
 
             if opponent_type == "self_play":
-                opp_action = _self_play_opponent_action(state, opponent_weights, engine)
+                opp_action = _self_play_opponent_action(state, opponent_policy, engine)
             else:
                 opp_action = opponent_fn(engine)
 
@@ -716,20 +786,33 @@ class ParallelRunner:
         runner.shutdown()
     """
 
-    def __init__(self, num_workers: int = 4, timeout: int = 300):
+    def __init__(self, num_workers: Optional[int] = None, timeout: int = 300):
         """Initialize the parallel runner.
 
         Args:
-            num_workers: Number of parallel worker processes.
+            num_workers: Worker processes to run matches on. ``None`` uses
+                :func:`default_worker_count`.
             timeout: Maximum seconds per evaluation batch.
         """
-        self.num_workers = num_workers
+        self.num_workers = (default_worker_count() if num_workers is None
+                            else max(1, int(num_workers)))
         self.timeout = timeout
         self.pool: Optional[Pool] = None
 
     def start(self) -> None:
-        """Start the worker pool."""
-        self.pool = mp.Pool(processes=self.num_workers)
+        """Start the worker pool, if it is not already running.
+
+        Idempotent. Previously this replaced ``self.pool`` unconditionally,
+        and the trainer calls ``start()`` on an evaluator whose constructor has
+        already started one -- so a full set of worker processes was orphaned
+        on every training run. ``Pool.__del__`` does not terminate workers, so
+        they stayed alive for the life of the desktop app and accumulated with
+        each run.
+        """
+        if self.pool is not None:
+            return
+        self.pool = mp.Pool(processes=self.num_workers,
+                            initializer=_init_worker)
         logger.info(f"Started parallel runner with {self.num_workers} workers")
 
     def shutdown(self) -> None:
@@ -739,6 +822,23 @@ class ParallelRunner:
             self.pool.join()
             self.pool = None
             logger.info("Shut down parallel runner")
+
+    def _chunksize(self, num_tasks: int) -> int:
+        """How many tasks to hand a worker at a time.
+
+        Sized against the pool rather than the batch: the previous divisors
+        (``len(tasks) // 4`` and ``// 8``) produced fewer chunks than there
+        were workers whenever the batch was large, so a 200-agent evaluation
+        across 11 workers ran on 4 of them and the rest sat idle.
+
+        Several small chunks per worker also matter because matches vary in
+        length -- a king rush ends in a couple of hundred ticks where a full
+        game runs to time. Coarse chunks let one unlucky worker gate a whole
+        round.
+        """
+        if num_tasks <= 0:
+            return 1
+        return max(1, num_tasks // (self.num_workers * 4))
 
     def evaluate_population(
         self,
@@ -785,7 +885,7 @@ class ParallelRunner:
             tasks.append((i, config, weights, opponent_type, opponent_weights))
 
         raw_results = self.pool.starmap(
-            _run_matches, tasks, chunksize=max(1, len(tasks) // 4))
+            _run_matches, tasks, chunksize=self._chunksize(len(tasks)))
 
         results = []
         for agent_idx, result in enumerate(raw_results):
@@ -900,4 +1000,4 @@ class ParallelRunner:
         ]
 
         return self.pool.starmap(
-            _run_head_to_head, tasks, chunksize=max(1, len(tasks) // 8))
+            _run_head_to_head, tasks, chunksize=self._chunksize(len(tasks)))
