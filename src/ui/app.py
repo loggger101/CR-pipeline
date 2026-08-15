@@ -22,8 +22,8 @@ from .jobs import JobRunner
 from .operations import (
     MATCH_DURATIONS, SCRIPTED_OPPONENTS, START_CONTINUE, START_FRESH,
     START_MODES, START_SEED, TOURNAMENT_FORMATS, build_training_config,
-    evaluate_against_scripted, evaluate_head_to_head, list_runs,
-    load_agent_genome, load_run_history, new_run_dir, play_match,
+    default_worker_count, evaluate_against_scripted, evaluate_head_to_head,
+    list_runs, load_agent_genome, load_run_history, new_run_dir, play_match,
     resolve_runs_dir, run_dir_for_resume, run_training,
 )
 
@@ -311,7 +311,7 @@ class TrainingTab(tk.Frame):
             ("population_size", "Population", 24, None),
             ("max_generations", "Generations", 20, None),
             ("elite_count", "Elite count", 4, None),
-            ("num_workers", "Workers", max(2, (os.cpu_count() or 4) // 2), None),
+            ("num_workers", "Workers", default_worker_count(), None),
             ("seed", "Seed", 42, None),
             ("tournament_format", "Format", "swiss", TOURNAMENT_FORMATS),
             ("tournament_matches", "Matches / pairing", 2, None),

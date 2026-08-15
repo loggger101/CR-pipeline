@@ -16,7 +16,7 @@ import pytest
 from src.env.sim.engine import SimulationEngine
 from src.models.policy import (
     DEFAULT_POLICY_SPEC, FEATURE_DIM, NUM_OUTPUTS, PolicySpec,
-    encode_features, policy_forward,
+    compile_genome, encode_features, policy_forward,
 )
 
 
@@ -158,3 +158,58 @@ class TestFeatureEncoding:
         eng._spawn_unit("knight", 3.0, 4.0, "player")
         occupied = encode_features(eng, "player")
         assert not np.array_equal(empty, occupied)
+
+
+class TestCompiledGenome:
+    """A genome unpacked once must behave exactly like the flat vector.
+
+    Match loops compile the genome before the first tick rather than
+    re-slicing it on each of the several thousand that follow, so the two
+    paths have to agree exactly -- not approximately, since a different action
+    choice would change the match and therefore the fitness.
+    """
+
+    def test_compiled_forward_matches_flat_forward(self):
+        eng = SimulationEngine(seed=4, record_replay=False)
+        eng.reset()
+        genome = _genome(11)
+        features = encode_features(eng, "player")
+
+        flat_logits, flat_placement = policy_forward(genome, features)
+        compiled = compile_genome(genome)
+        comp_logits, comp_placement = policy_forward(compiled, features)
+
+        assert np.array_equal(flat_logits, comp_logits)
+        assert np.array_equal(flat_placement, comp_placement)
+
+    def test_compiling_twice_is_a_no_op(self):
+        compiled = compile_genome(_genome(3))
+        assert compile_genome(compiled) is compiled
+
+    def test_none_compiles_to_none(self):
+        assert compile_genome(None) is None
+
+    def test_compiled_policy_plays_the_same_match(self):
+        """The whole match, tick for tick, not just one forward pass."""
+        from src.env.sim.parallel_runner import _policy_action
+
+        genome = _genome(21)
+        compiled = compile_genome(genome)
+
+        flat_engine = SimulationEngine(seed=9, record_replay=False)
+        flat_engine.reset()
+        compiled_engine = SimulationEngine(seed=9, record_replay=False)
+        compiled_engine.reset()
+
+        for _ in range(400):
+            if flat_engine.terminated or compiled_engine.terminated:
+                break
+            flat_action = _policy_action(genome, flat_engine, "player")
+            compiled_action = _policy_action(compiled, compiled_engine, "player")
+            assert flat_action.action_type == compiled_action.action_type
+            assert flat_action.card_index == compiled_action.card_index
+            flat_engine.step(flat_action, None)
+            compiled_engine.step(compiled_action, None)
+
+        assert flat_engine.tick == compiled_engine.tick
+        assert flat_engine.player_trophies == compiled_engine.player_trophies

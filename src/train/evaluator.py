@@ -463,7 +463,9 @@ class TournamentRunner:
                   agent_stats: Dict[str, AgentTournamentStats],
                   h2h_records: Dict[Tuple[str, str], HeadToHeadRecord],
                   elo_ratings: Dict[str, float],
-                  total_matches: int) -> TournamentResult:
+                  total_matches: int,
+                  bracket: Optional[TournamentBracket] = None
+                  ) -> TournamentResult:
         """Compute win rates and final rankings."""
         rankings = []
         for aid in agent_ids:
@@ -479,8 +481,57 @@ class TournamentRunner:
             draws={aid: s.draws for aid, s in agent_stats.items()},
             losses={aid: s.losses for aid, s in agent_stats.items()},
             total_matches=total_matches,
+            bracket=bracket,
             elo_ratings=elo_ratings,
         )
+
+    # ------------------------------------------------------------------
+    # Shared round execution
+    # ------------------------------------------------------------------
+
+    def _play_round(self, contests: List[Tuple[str, str]],
+                    index_of: Dict[str, int],
+                    weights_list: List[np.ndarray],
+                    matches_per_pair: int, seed: int) -> List[Any]:
+        """Play every matchup in one round across the worker pool.
+
+        Matchups within a round are independent, so they go out as a single
+        batch. Dispatching them one at a time through ``run_head_to_head`` --
+        which runs the matches inline rather than on the pool -- left every
+        format except Swiss executing a whole generation on the calling
+        thread. In the desktop app that thread is the training worker, so the
+        Tk event loop was starved and Windows closed the window as hung.
+        """
+        if not contests:
+            return []
+        return self.runner.run_pairings(
+            pairings=[(index_of[a], index_of[b]) for a, b in contests],
+            weights_list=weights_list,
+            matches_per_pair=matches_per_pair,
+            seed=seed,
+        )
+
+    @staticmethod
+    def _matchup_winner(result) -> int:
+        """Which side won a matchup: 1 for agent1, 2 for agent2.
+
+        Match wins decide it; total towers destroyed breaks a tie, and agent2
+        takes an exact tie (matching the original bracket behaviour).
+        """
+        meta = result.metadata
+        a1_wins = meta.get("agent1_wins", 0)
+        a2_wins = meta.get("agent2_wins", 0)
+        if a1_wins != a2_wins:
+            return 1 if a1_wins > a2_wins else 2
+        return 1 if meta.get("agent1_towers", 0) > meta.get("agent2_towers", 0) else 2
+
+    @staticmethod
+    def _split_byes(entrants: List[str]) -> Tuple[List[Tuple[str, str]], Optional[str]]:
+        """Pair a bracket round, returning the odd entrant out as a bye."""
+        contests = [(entrants[i], entrants[i + 1])
+                    for i in range(0, len(entrants) - 1, 2)]
+        bye = entrants[-1] if len(entrants) % 2 else None
+        return contests, bye
 
     def run_round_robin(
         self,
@@ -488,17 +539,24 @@ class TournamentRunner:
         weights_list: List[np.ndarray],
         matches_per_pair: int = 4,
         seed_offset: int = 0,
+        initial_elo: Optional[Dict[str, float]] = None,
     ) -> TournamentResult:
         """Run a round-robin tournament (all-vs-all).
 
         Each agent plays against every other agent for the specified
         number of matches, with side-swapping for fairness.
 
+        Every pairing is independent, so the whole tournament goes out as one
+        batch to the worker pool. Note that the match count grows as
+        ``n*(n-1)/2``: at a population of 200 that is ~19,900 matchups against
+        Swiss's ~800, so Swiss remains the right default for large fields.
+
         Args:
             agent_ids: List of agent identifiers.
             weights_list: List of weight arrays corresponding to agent_ids.
             matches_per_pair: Matches per agent pair (split evenly for side-swapping).
             seed_offset: Offset for random seeds.
+            initial_elo: Ratings carried in from previous generations.
 
         Returns:
             TournamentResult with rankings and detailed stats.
@@ -506,93 +564,26 @@ class TournamentRunner:
         n = len(agent_ids)
         agent_stats = {aid: AgentTournamentStats(agent_id=aid) for aid in agent_ids}
         h2h_records: Dict[Tuple[str, str], HeadToHeadRecord] = {}
-        total_matches = 0
+        # Ratings carry across generations, as they do for Swiss. Resetting
+        # every agent to 1500 each generation made ELO a within-generation
+        # statistic, which is exactly what the trainer uses it *not* to be.
+        elo_ratings = {aid: (initial_elo or {}).get(aid, DEFAULT_ELO)
+                       for aid in agent_ids}
 
-        # Initialize ELO ratings
-        elo_ratings = {aid: 1500.0 for aid in agent_ids}
-
-        # Round-robin: each pair plays
-        for i in range(n):
-            for j in range(i + 1, n):
-                aid1, aid2 = agent_ids[i], agent_ids[j]
-                key = (min(aid1, aid2), max(aid1, aid2))
-
-                # Run head-to-head with side-swapping
-                result = self.runner.run_head_to_head(
-                    agent1_weights=weights_list[i],
-                    agent2_weights=weights_list[j],
-                    matches_per_pair=matches_per_pair,
-                    seed=self.seed + seed_offset + i * 100 + j,
-                )
-
-                # Extract per-agent stats from metadata
-                meta = result.metadata
-                a1_wins = meta.get("agent1_wins", 0)
-                a1_draws = meta.get("agent1_draws", 0)
-                a1_losses = meta.get("agent1_losses", 0)
-                a1_towers = meta.get("agent1_towers", 0)
-                a1_duration = meta.get("agent1_duration", 0)
-                a2_wins = meta.get("agent2_wins", 0)
-                a2_draws = meta.get("agent2_draws", 0)
-                a2_losses = meta.get("agent2_losses", 0)
-                a2_towers = meta.get("agent2_towers", 0)
-                a2_duration = meta.get("agent2_duration", 0)
-
-                # Update agent stats
-                agent_stats[aid1].wins += a1_wins
-                agent_stats[aid1].draws += a1_draws
-                agent_stats[aid1].losses += a1_losses
-                agent_stats[aid1].towers_destroyed += a1_towers
-                agent_stats[aid1].total_duration += a1_duration
-
-                agent_stats[aid2].wins += a2_wins
-                agent_stats[aid2].draws += a2_draws
-                agent_stats[aid2].losses += a2_losses
-                agent_stats[aid2].towers_destroyed += a2_towers
-                agent_stats[aid2].total_duration += a2_duration
-
-                # Update H2H record
-                h2h = HeadToHeadRecord(
-                    agent1_id=aid1,
-                    agent2_id=aid2,
-                    agent1_wins=a1_wins,
-                    agent2_wins=a2_wins,
-                    draws=a1_draws + a2_draws,
-                    agent1_towers=a1_towers,
-                    agent2_towers=a2_towers,
-                    agent1_duration=a1_duration,
-                    agent2_duration=a2_duration,
-                )
-                h2h_records[key] = h2h
-
-                # Update ELO ratings
-                self._update_elo_pair(aid1, aid2, a1_wins, a1_draws, a2_wins, a2_draws,
-                                       elo_ratings, k_factor=32.0)
-
-                total_matches += matches_per_pair
-
-        # Compute win rates and composite scores
-        rankings = []
-        for aid in agent_ids:
-            stats = agent_stats[aid]
-            # win_rate is a computed property; assigning to it raised
-            # AttributeError, which crashed the tail of every tournament
-            # format before any ranking was produced.
-            score = stats.compute_composite_score()
-            rankings.append((aid, score))
-
-        rankings.sort(key=lambda x: x[1], reverse=True)
-
-        return TournamentResult(
-            rankings=rankings,
-            agent_stats=agent_stats,
-            h2h_records=h2h_records,
-            wins={aid: stats.wins for aid, stats in agent_stats.items()},
-            draws={aid: stats.draws for aid, stats in agent_stats.items()},
-            losses={aid: stats.losses for aid, stats in agent_stats.items()},
-            total_matches=total_matches,
-            elo_ratings=elo_ratings,
+        pairings = [(i, j) for i in range(n) for j in range(i + 1, n)]
+        results = self.runner.run_pairings(
+            pairings=pairings,
+            weights_list=weights_list,
+            matches_per_pair=matches_per_pair,
+            seed=self.seed + seed_offset,
         )
+
+        for (i, j), result in zip(pairings, results):
+            self._record_matchup(agent_ids[i], agent_ids[j], result,
+                                 agent_stats, h2h_records, elo_ratings)
+
+        return self._finalise(agent_ids, agent_stats, h2h_records, elo_ratings,
+                              len(pairings) * matches_per_pair)
 
     def run_single_elimination(
         self,
@@ -600,143 +591,68 @@ class TournamentRunner:
         weights_list: List[np.ndarray],
         matches_per_pair: int = 4,
         seed_offset: int = 0,
+        initial_elo: Optional[Dict[str, float]] = None,
     ) -> TournamentResult:
         """Run a single elimination tournament.
 
-        Agents are seeded by their current fitness (if available).
-        Winners advance, losers are eliminated.
+        Agents are seeded alphabetically for determinism. Winners advance,
+        losers are eliminated, and each round's matchups are played on the
+        worker pool in one batch.
+
+        The previous implementation rebuilt the next round as
+        ``[(a, None) for a in next_round]`` -- every survivor paired against a
+        bye. The field therefore never shrank, ``while len(current_round) > 1``
+        never became false, and the loop spun forever while appending a round
+        to the bracket and a win to every agent on each pass. Picking this
+        format in the desktop app hung the window and grew memory until
+        Windows closed it.
 
         Args:
             agent_ids: List of agent identifiers.
             weights_list: List of weight arrays.
             matches_per_pair: Matches per matchup.
             seed_offset: Offset for random seeds.
+            initial_elo: Ratings carried in from previous generations.
 
         Returns:
             TournamentResult with rankings and bracket.
         """
-        n = len(agent_ids)
         agent_stats = {aid: AgentTournamentStats(agent_id=aid) for aid in agent_ids}
         h2h_records: Dict[Tuple[str, str], HeadToHeadRecord] = {}
+        elo_ratings = {aid: (initial_elo or {}).get(aid, DEFAULT_ELO)
+                       for aid in agent_ids}
+        index_of = {aid: i for i, aid in enumerate(agent_ids)}
         total_matches = 0
-        elo_ratings = {aid: 1500.0 for aid in agent_ids}
 
-        # Seed: sort by some heuristic (here, alphabetical for determinism)
-        # In practice, could use current fitness to seed
-        seeded_agents = sorted(agent_ids)  # Could be sorted by fitness
-
-        # Build bracket rounds
         bracket = TournamentBracket(format=TournamentFormat.SINGLE_ELIMINATION)
-        current_round = [(seeded_agents[i], seeded_agents[i + 1])
-                         for i in range(0, len(seeded_agents) - 1, 2)]
-        if len(seeded_agents) % 2 == 1:
-            current_round.append((seeded_agents[-1], None))  # Bye
-
+        survivors = sorted(agent_ids)
         round_num = 0
-        while len(current_round) > 1:
-            next_round = []
-            for agent1_id, agent2_id in current_round:
-                if agent2_id is None:
-                    # Bye - agent advances automatically
-                    next_round.append(agent1_id)
-                    agent_stats[agent1_id].wins += 1
-                    continue
 
-                # Get indices
-                i1 = agent_ids.index(agent1_id)
-                i2 = agent_ids.index(agent2_id)
+        while len(survivors) > 1:
+            contests, bye = self._split_byes(survivors)
+            results = self._play_round(
+                contests, index_of, weights_list, matches_per_pair,
+                seed=self.seed + seed_offset + round_num * 1000)
 
-                # Run head-to-head
-                result = self.runner.run_head_to_head(
-                    agent1_weights=weights_list[i1],
-                    agent2_weights=weights_list[i2],
-                    matches_per_pair=matches_per_pair,
-                    seed=self.seed + seed_offset + round_num * 1000,
-                )
-
-                meta = result.metadata
-                a1_wins = meta.get("agent1_wins", 0)
-                a1_draws = meta.get("agent1_draws", 0)
-                a1_losses = meta.get("agent1_losses", 0)
-                a1_towers = meta.get("agent1_towers", 0)
-                a1_duration = meta.get("agent1_duration", 0)
-                a2_wins = meta.get("agent2_wins", 0)
-                a2_draws = meta.get("agent2_draws", 0)
-                a2_losses = meta.get("agent2_losses", 0)
-                a2_towers = meta.get("agent2_towers", 0)
-                a2_duration = meta.get("agent2_duration", 0)
-
-                # Update stats
-                agent_stats[agent1_id].wins += a1_wins
-                agent_stats[agent1_id].draws += a1_draws
-                agent_stats[agent1_id].losses += a1_losses
-                agent_stats[agent1_id].towers_destroyed += a1_towers
-                agent_stats[agent1_id].total_duration += a1_duration
-
-                agent_stats[agent2_id].wins += a2_wins
-                agent_stats[agent2_id].draws += a2_draws
-                agent_stats[agent2_id].losses += a2_losses
-                agent_stats[agent2_id].towers_destroyed += a2_towers
-                agent_stats[agent2_id].total_duration += a2_duration
-
-                # H2H record
-                key = (min(agent1_id, agent2_id), max(agent1_id, agent2_id))
-                h2h_records[key] = HeadToHeadRecord(
-                    agent1_id=agent1_id, agent2_id=agent2_id,
-                    agent1_wins=a1_wins, agent2_wins=a2_wins,
-                    draws=a1_draws + a2_draws,
-                    agent1_towers=a1_towers, agent2_towers=a2_towers,
-                    agent1_duration=a1_duration, agent2_duration=a2_duration,
-                )
-
-                # Determine winner (most wins, tiebreak by towers)
-                if a1_wins > a2_wins:
-                    next_round.append(agent1_id)
-                    self._update_elo_pair(agent1_id, agent2_id, a1_wins, a1_draws,
-                                          a2_wins, a2_draws, elo_ratings)
-                elif a2_wins > a1_wins:
-                    next_round.append(agent2_id)
-                    self._update_elo_pair(agent2_id, agent1_id, a2_wins, a2_draws,
-                                          a1_wins, a1_draws, elo_ratings)
-                else:
-                    # Tiebreak by towers
-                    if a1_towers > a2_towers:
-                        next_round.append(agent1_id)
-                    else:
-                        next_round.append(agent2_id)
-                    self._update_elo_pair(agent1_id, agent2_id, a1_draws, a1_draws,
-                                          a2_draws, a2_draws, elo_ratings)
-
+            advancing = []
+            for (aid1, aid2), result in zip(contests, results):
+                self._record_matchup(aid1, aid2, result, agent_stats,
+                                     h2h_records, elo_ratings)
+                advancing.append(
+                    aid1 if self._matchup_winner(result) == 1 else aid2)
                 total_matches += matches_per_pair
 
-            bracket.rounds.append(current_round)
-            current_round = [(a, None) for a in next_round]
+            bracket.rounds.append(list(contests))
+            if bye is not None:
+                advancing.append(bye)
+                agent_stats[bye].wins += 1   # a bye advances unopposed
+            survivors = advancing
             round_num += 1
 
-        bracket.winners = current_round
+        bracket.winners = list(survivors)
 
-        # Compute final rankings
-        rankings = []
-        for aid in agent_ids:
-            stats = agent_stats[aid]
-            # win_rate is a computed property; assigning to it raised
-            # AttributeError, which crashed the tail of every tournament
-            # format before any ranking was produced.
-            score = stats.compute_composite_score()
-            rankings.append((aid, score))
-        rankings.sort(key=lambda x: x[1], reverse=True)
-
-        return TournamentResult(
-            rankings=rankings,
-            agent_stats=agent_stats,
-            h2h_records=h2h_records,
-            wins={aid: stats.wins for aid, stats in agent_stats.items()},
-            draws={aid: stats.draws for aid, stats in agent_stats.items()},
-            losses={aid: stats.losses for aid, stats in agent_stats.items()},
-            total_matches=total_matches,
-            bracket=bracket,
-            elo_ratings=elo_ratings,
-        )
+        return self._finalise(agent_ids, agent_stats, h2h_records, elo_ratings,
+                              total_matches, bracket=bracket)
 
     def run_double_elimination(
         self,
@@ -744,191 +660,97 @@ class TournamentRunner:
         weights_list: List[np.ndarray],
         matches_per_pair: int = 4,
         seed_offset: int = 0,
+        initial_elo: Optional[Dict[str, float]] = None,
     ) -> TournamentResult:
         """Run a double elimination tournament.
 
-        Agents are eliminated after two losses. The winner of the
-        loser bracket final plays the winner bracket final winner
-        (with a possible bracket reset).
+        Agents are eliminated after two losses: the winners' bracket plays
+        down to one undefeated agent while everyone it knocks out drops into
+        the losers' bracket, which then plays down to one survivor. The two
+        meet in the grand final. Each round is batched onto the worker pool.
+
+        The previous implementation drove both brackets from a single loop
+        whose condition was ``len(winner_bracket) + len(loser_bracket) > 1``.
+        Losers were only ever added to the losers' bracket, never eliminated
+        from it, so once the winners' bracket was down to one agent the sum
+        stopped changing and the loop spun forever -- appending a round to the
+        bracket on every pass. Like single elimination, choosing this format
+        hung the app.
 
         Args:
             agent_ids: List of agent identifiers.
             weights_list: List of weight arrays.
             matches_per_pair: Matches per matchup.
             seed_offset: Offset for random seeds.
+            initial_elo: Ratings carried in from previous generations.
 
         Returns:
             TournamentResult with rankings and bracket.
         """
-        n = len(agent_ids)
         agent_stats = {aid: AgentTournamentStats(agent_id=aid) for aid in agent_ids}
         h2h_records: Dict[Tuple[str, str], HeadToHeadRecord] = {}
+        elo_ratings = {aid: (initial_elo or {}).get(aid, DEFAULT_ELO)
+                       for aid in agent_ids}
+        index_of = {aid: i for i, aid in enumerate(agent_ids)}
         total_matches = 0
-        elo_ratings = {aid: 1500.0 for aid in agent_ids}
 
-        # Initialize brackets
-        winner_bracket = list(sorted(agent_ids))
-        loser_bracket: List[str] = []
         bracket = TournamentBracket(format=TournamentFormat.DOUBLE_ELIMINATION)
-        bracket.loser_bracket = list(loser_bracket)
-
+        winner_bracket = sorted(agent_ids)
+        loser_bracket: List[str] = []
         round_num = 0
-        grand_final_played = False
 
-        while len(winner_bracket) + len(loser_bracket) > 1:
-            # Process winner bracket matches
-            next_winner = []
-            next_loser = []
+        def play(entrants: List[str], collect_losers: bool) -> List[str]:
+            """Play one bracket round; return who advances."""
+            nonlocal total_matches, round_num
+            contests, bye = self._split_byes(entrants)
+            results = self._play_round(
+                contests, index_of, weights_list, matches_per_pair,
+                seed=self.seed + seed_offset + round_num * 1000)
 
-            for i in range(0, len(winner_bracket) - 1, 2):
-                agent1_id = winner_bracket[i]
-                agent2_id = winner_bracket[i + 1]
-
-                i1 = agent_ids.index(agent1_id)
-                i2 = agent_ids.index(agent2_id)
-
-                result = self.runner.run_head_to_head(
-                    agent1_weights=weights_list[i1],
-                    agent2_weights=weights_list[i2],
-                    matches_per_pair=matches_per_pair,
-                    seed=self.seed + seed_offset + round_num * 1000,
-                )
-
-                meta = result.metadata
-                a1_wins = meta.get("agent1_wins", 0)
-                a1_draws = meta.get("agent1_draws", 0)
-                a1_losses = meta.get("agent1_losses", 0)
-                a1_towers = meta.get("agent1_towers", 0)
-                a1_duration = meta.get("agent1_duration", 0)
-                a2_wins = meta.get("agent2_wins", 0)
-                a2_draws = meta.get("agent2_draws", 0)
-                a2_losses = meta.get("agent2_losses", 0)
-                a2_towers = meta.get("agent2_towers", 0)
-                a2_duration = meta.get("agent2_duration", 0)
-
-                # Update stats
-                agent_stats[agent1_id].wins += a1_wins
-                agent_stats[agent1_id].draws += a1_draws
-                agent_stats[agent1_id].losses += a1_losses
-                agent_stats[agent1_id].towers_destroyed += a1_towers
-                agent_stats[agent1_id].total_duration += a1_duration
-
-                agent_stats[agent2_id].wins += a2_wins
-                agent_stats[agent2_id].draws += a2_draws
-                agent_stats[agent2_id].losses += a2_losses
-                agent_stats[agent2_id].towers_destroyed += a2_towers
-                agent_stats[agent2_id].total_duration += a2_duration
-
-                key = (min(agent1_id, agent2_id), max(agent1_id, agent2_id))
-                h2h_records[key] = HeadToHeadRecord(
-                    agent1_id=agent1_id, agent2_id=agent2_id,
-                    agent1_wins=a1_wins, agent2_wins=a2_wins,
-                    draws=a1_draws + a2_draws,
-                    agent1_towers=a1_towers, agent2_towers=a2_towers,
-                    agent1_duration=a1_duration, agent2_duration=a2_duration,
-                )
-
-                if a1_wins > a2_wins:
-                    next_winner.append(agent1_id)
-                    next_loser.append(agent2_id)
-                elif a2_wins > a1_wins:
-                    next_winner.append(agent2_id)
-                    next_loser.append(agent1_id)
-                else:
-                    if a1_towers > a2_towers:
-                        next_winner.append(agent1_id)
-                        next_loser.append(agent2_id)
-                    else:
-                        next_winner.append(agent2_id)
-                        next_loser.append(agent1_id)
-
+            advancing = []
+            for (aid1, aid2), result in zip(contests, results):
+                self._record_matchup(aid1, aid2, result, agent_stats,
+                                     h2h_records, elo_ratings)
+                won_by_first = self._matchup_winner(result) == 1
+                advancing.append(aid1 if won_by_first else aid2)
+                if collect_losers:
+                    loser_bracket.append(aid2 if won_by_first else aid1)
                 total_matches += matches_per_pair
 
-            # Handle bye in winner bracket
-            if len(winner_bracket) % 2 == 1:
-                next_winner.append(winner_bracket[-1])
-
-            # Move losers to loser bracket
-            loser_bracket.extend(next_loser)
-            winner_bracket = next_winner
-
-            bracket.rounds.append([(winner_bracket[i], winner_bracket[i + 1])
-                                    for i in range(0, len(winner_bracket) - 1, 2)])
-            bracket.loser_bracket = list(loser_bracket)
+            bracket.rounds.append(list(contests))
+            if bye is not None:
+                advancing.append(bye)
             round_num += 1
+            return advancing
 
-        # Final: winner bracket champion vs loser bracket champion
+        # Winners' bracket: play down to a single undefeated agent.
+        while len(winner_bracket) > 1:
+            winner_bracket = play(winner_bracket, collect_losers=True)
+
+        # Losers' bracket: everyone knocked out plays down to one survivor.
+        while len(loser_bracket) > 1:
+            loser_bracket = play(loser_bracket, collect_losers=False)
+        bracket.loser_bracket = list(loser_bracket)
+
+        # Grand final.
         if winner_bracket and loser_bracket:
-            wb_champ = winner_bracket[0]
-            lb_champ = loser_bracket[0]
-
-            i1 = agent_ids.index(wb_champ)
-            i2 = agent_ids.index(lb_champ)
-
-            result = self.runner.run_head_to_head(
-                agent1_weights=weights_list[i1],
-                agent2_weights=weights_list[i2],
-                matches_per_pair=matches_per_pair,
-                seed=self.seed + seed_offset + round_num * 1000,
-            )
-
-            meta = result.metadata
-            a1_wins = meta.get("agent1_wins", 0)
-            a1_draws = meta.get("agent1_draws", 0)
-            a1_losses = meta.get("agent1_losses", 0)
-            a1_towers = meta.get("agent1_towers", 0)
-            a1_duration = meta.get("agent1_duration", 0)
-            a2_wins = meta.get("agent2_wins", 0)
-            a2_draws = meta.get("agent2_draws", 0)
-            a2_losses = meta.get("agent2_losses", 0)
-            a2_towers = meta.get("agent2_towers", 0)
-            a2_duration = meta.get("agent2_duration", 0)
-
-            agent_stats[wb_champ].wins += a1_wins
-            agent_stats[wb_champ].draws += a1_draws
-            agent_stats[wb_champ].losses += a1_losses
-            agent_stats[wb_champ].towers_destroyed += a1_towers
-            agent_stats[wb_champ].total_duration += a1_duration
-
-            agent_stats[lb_champ].wins += a2_wins
-            agent_stats[lb_champ].draws += a2_draws
-            agent_stats[lb_champ].losses += a2_losses
-            agent_stats[lb_champ].towers_destroyed += a2_towers
-            agent_stats[lb_champ].total_duration += a2_duration
-
-            key = (min(wb_champ, lb_champ), max(wb_champ, lb_champ))
-            h2h_records[key] = HeadToHeadRecord(
-                agent1_id=wb_champ, agent2_id=lb_champ,
-                agent1_wins=a1_wins, agent2_wins=a2_wins,
-                draws=a1_draws + a2_draws,
-                agent1_towers=a1_towers, agent2_towers=a2_towers,
-                agent1_duration=a1_duration, agent2_duration=a2_duration,
-            )
-
+            contests = [(winner_bracket[0], loser_bracket[0])]
+            results = self._play_round(
+                contests, index_of, weights_list, matches_per_pair,
+                seed=self.seed + seed_offset + round_num * 1000)
+            self._record_matchup(contests[0][0], contests[0][1], results[0],
+                                 agent_stats, h2h_records, elo_ratings)
+            bracket.rounds.append(contests)
+            bracket.winners = [
+                contests[0][0] if self._matchup_winner(results[0]) == 1
+                else contests[0][1]
+            ]
             total_matches += matches_per_pair
+        else:
+            bracket.winners = list(winner_bracket)
 
-        # Compute final rankings
-        rankings = []
-        for aid in agent_ids:
-            stats = agent_stats[aid]
-            # win_rate is a computed property; assigning to it raised
-            # AttributeError, which crashed the tail of every tournament
-            # format before any ranking was produced.
-            score = stats.compute_composite_score()
-            rankings.append((aid, score))
-        rankings.sort(key=lambda x: x[1], reverse=True)
-
-        return TournamentResult(
-            rankings=rankings,
-            agent_stats=agent_stats,
-            h2h_records=h2h_records,
-            wins={aid: stats.wins for aid, stats in agent_stats.items()},
-            draws={aid: stats.draws for aid, stats in agent_stats.items()},
-            losses={aid: stats.losses for aid, stats in agent_stats.items()},
-            total_matches=total_matches,
-            bracket=bracket,
-            elo_ratings=elo_ratings,
-        )
+        return self._finalise(agent_ids, agent_stats, h2h_records, elo_ratings,
+                              total_matches, bracket=bracket)
 
     def run_league(
         self,
@@ -937,6 +759,7 @@ class TournamentRunner:
         matches_per_pair: int = 4,
         rounds: int = 3,
         seed_offset: int = 0,
+        initial_elo: Optional[Dict[str, float]] = None,
     ) -> TournamentResult:
         """Run a league-style tournament with multiple rounds.
 
@@ -949,111 +772,44 @@ class TournamentRunner:
             matches_per_pair: Matches per matchup per round.
             rounds: Number of rounds to play.
             seed_offset: Offset for random seeds.
+            initial_elo: Ratings carried in from previous generations.
 
         Returns:
             TournamentResult with rankings and bracket.
         """
         agent_stats = {aid: AgentTournamentStats(agent_id=aid) for aid in agent_ids}
         h2h_records: Dict[Tuple[str, str], HeadToHeadRecord] = {}
+        elo_ratings = {aid: (initial_elo or {}).get(aid, DEFAULT_ELO)
+                       for aid in agent_ids}
+        index_of = {aid: i for i, aid in enumerate(agent_ids)}
         total_matches = 0
-        elo_ratings = {aid: 1500.0 for aid in agent_ids}
 
         bracket = TournamentBracket(format=TournamentFormat.LEAGUE)
-        standings_history = []
 
         for round_num in range(rounds):
-            # Re-sort by current standings
+            # Re-sort by current standings, then pair neighbours.
             sorted_agents = sorted(
                 agent_ids,
                 key=lambda aid: agent_stats[aid].compute_composite_score(),
                 reverse=True,
             )
+            round_matches, _bye = self._split_byes(sorted_agents)
 
-            round_matches = []
-            for i in range(0, len(sorted_agents) - 1, 2):
-                agent1_id = sorted_agents[i]
-                agent2_id = sorted_agents[i + 1]
-                round_matches.append((agent1_id, agent2_id))
+            # Every pairing in a round is independent, so the round goes out
+            # as one batch rather than one matchup at a time on this thread.
+            results = self._play_round(
+                round_matches, index_of, weights_list, matches_per_pair,
+                seed=self.seed + seed_offset + round_num * 10000)
 
-                i1 = agent_ids.index(agent1_id)
-                i2 = agent_ids.index(agent2_id)
-
-                result = self.runner.run_head_to_head(
-                    agent1_weights=weights_list[i1],
-                    agent2_weights=weights_list[i2],
-                    matches_per_pair=matches_per_pair,
-                    seed=self.seed + seed_offset + round_num * 10000 + i,
-                )
-
-                meta = result.metadata
-                a1_wins = meta.get("agent1_wins", 0)
-                a1_draws = meta.get("agent1_draws", 0)
-                a1_losses = meta.get("agent1_losses", 0)
-                a1_towers = meta.get("agent1_towers", 0)
-                a1_duration = meta.get("agent1_duration", 0)
-                a2_wins = meta.get("agent2_wins", 0)
-                a2_draws = meta.get("agent2_draws", 0)
-                a2_losses = meta.get("agent2_losses", 0)
-                a2_towers = meta.get("agent2_towers", 0)
-                a2_duration = meta.get("agent2_duration", 0)
-
-                agent_stats[agent1_id].wins += a1_wins
-                agent_stats[agent1_id].draws += a1_draws
-                agent_stats[agent1_id].losses += a1_losses
-                agent_stats[agent1_id].towers_destroyed += a1_towers
-                agent_stats[agent1_id].total_duration += a1_duration
-
-                agent_stats[agent2_id].wins += a2_wins
-                agent_stats[agent2_id].draws += a2_draws
-                agent_stats[agent2_id].losses += a2_losses
-                agent_stats[agent2_id].towers_destroyed += a2_towers
-                agent_stats[agent2_id].total_duration += a2_duration
-
-                key = (min(agent1_id, agent2_id), max(agent1_id, agent2_id))
-                if key not in h2h_records:
-                    h2h_records[key] = HeadToHeadRecord(
-                        agent1_id=agent1_id, agent2_id=agent2_id,
-                    )
-                h2h = h2h_records[key]
-                h2h.agent1_wins += a1_wins
-                h2h.agent2_wins += a2_wins
-                h2h.draws += a1_draws + a2_draws
-                h2h.agent1_towers += a1_towers
-                h2h.agent2_towers += a2_towers
-                h2h.agent1_duration += a1_duration
-                h2h.agent2_duration += a2_duration
-
+            for (aid1, aid2), result in zip(round_matches, results):
+                self._record_matchup(aid1, aid2, result, agent_stats,
+                                     h2h_records, elo_ratings)
                 total_matches += matches_per_pair
 
             bracket.rounds.append(round_matches)
-            standings_history.append(
-                sorted(agent_ids,
-                       key=lambda aid: agent_stats[aid].compute_composite_score(),
-                       reverse=True)
-            )
 
-        # Compute final rankings
-        rankings = []
-        for aid in agent_ids:
-            stats = agent_stats[aid]
-            # win_rate is a computed property; assigning to it raised
-            # AttributeError, which crashed the tail of every tournament
-            # format before any ranking was produced.
-            score = stats.compute_composite_score()
-            rankings.append((aid, score))
-        rankings.sort(key=lambda x: x[1], reverse=True)
-
-        return TournamentResult(
-            rankings=rankings,
-            agent_stats=agent_stats,
-            h2h_records=h2h_records,
-            wins={aid: stats.wins for aid, stats in agent_stats.items()},
-            draws={aid: stats.draws for aid, stats in agent_stats.items()},
-            losses={aid: stats.losses for aid, stats in agent_stats.items()},
-            total_matches=total_matches,
-            bracket=bracket,
-            elo_ratings=elo_ratings,
-        )
+        return self._finalise(agent_ids, agent_stats, h2h_records, elo_ratings,
+                              total_matches, bracket=bracket)
 
     def _update_elo_pair(self, agent1_id: str, agent2_id: str,
                          a1_wins: int, a1_draws: int,
@@ -1112,14 +868,20 @@ class TournamentRunner:
             return self.run_swiss(agent_ids, weights_list, matches_per_pair,
                                   rounds, seed_offset, initial_elo)
         if format == TournamentFormat.ROUND_ROBIN:
-            return self.run_round_robin(agent_ids, weights_list, matches_per_pair, seed_offset)
+            return self.run_round_robin(agent_ids, weights_list, matches_per_pair,
+                                        seed_offset, initial_elo)
         if format == TournamentFormat.SINGLE_ELIMINATION:
-            return self.run_single_elimination(agent_ids, weights_list, matches_per_pair, seed_offset)
+            return self.run_single_elimination(agent_ids, weights_list,
+                                               matches_per_pair, seed_offset,
+                                               initial_elo)
         if format == TournamentFormat.DOUBLE_ELIMINATION:
-            return self.run_double_elimination(agent_ids, weights_list, matches_per_pair, seed_offset)
+            return self.run_double_elimination(agent_ids, weights_list,
+                                               matches_per_pair, seed_offset,
+                                               initial_elo)
         if format == TournamentFormat.LEAGUE:
             return self.run_league(agent_ids, weights_list, matches_per_pair,
-                                   rounds if rounds is not None else 3, seed_offset)
+                                   rounds if rounds is not None else 3,
+                                   seed_offset, initial_elo)
         raise ValueError(f"Unknown tournament format: {format}")
 
 
@@ -1138,16 +900,24 @@ class FitnessEvaluator:
     - Head-to-head matchups with side-swapping
     """
 
-    def __init__(self, num_workers: int = 4, matches_per_agent: int = 10):
+    def __init__(self, num_workers: Optional[int] = None,
+                 matches_per_agent: int = 10,
+                 runner: Optional[ParallelRunner] = None):
         """Initialize the evaluator.
 
         Args:
-            num_workers: Number of parallel workers.
+            num_workers: Number of parallel workers. Ignored when ``runner``
+                is supplied.
             matches_per_agent: Default matches per agent.
+            runner: An existing pool to share rather than starting another.
+                The trainer passes its own so a training run holds one set of
+                worker processes instead of several.
         """
-        self.num_workers = num_workers
+        self._owns_runner = runner is None
+        self.runner = runner if runner is not None else ParallelRunner(
+            num_workers=num_workers)
+        self.num_workers = self.runner.num_workers
         self.matches_per_agent = matches_per_agent
-        self.runner = ParallelRunner(num_workers=num_workers)
         self.runner.start()
         self.tournament_runner = TournamentRunner(self.runner)
 
@@ -1361,9 +1131,21 @@ class FitnessEvaluator:
         return score
 
     def shutdown(self) -> None:
-        """Shut down the evaluator."""
-        self.runner.shutdown()
+        """Shut down the evaluator.
+
+        A pool passed in by the caller belongs to the caller, so it is left
+        running; only a pool this evaluator started is torn down.
+        """
+        if self._owns_runner:
+            self.runner.shutdown()
 
     def __del__(self) -> None:
-        """Clean up resources."""
-        self.runner.shutdown()
+        """Best-effort cleanup for evaluators that were never shut down.
+
+        Runs during interpreter shutdown and after a failed ``__init__``, when
+        attributes may not exist yet, so it must not assume any are present.
+        """
+        try:
+            self.shutdown()
+        except Exception:  # pragma: no cover - interpreter teardown
+            pass

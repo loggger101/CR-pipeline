@@ -14,6 +14,7 @@ from __future__ import annotations
 
 import json
 import logging
+import re
 import time
 from dataclasses import dataclass, field
 from enum import Enum, auto
@@ -21,6 +22,11 @@ from pathlib import Path
 from typing import Any, Callable, Dict, List, Optional
 
 logger = logging.getLogger(__name__)
+
+# A message placeholder: a context key, an optional format spec, and up to
+# three braces on each side, so both the current one-brace spelling and the
+# older three-brace one are recognised.
+_PLACEHOLDER = re.compile(r"\{{1,3}(\w+)(:[^}]*)?\}{1,3}")
 
 
 class AlertLevel(Enum):
@@ -99,11 +105,31 @@ class AlertRule:
         return True
 
     def trigger(self, context: Dict[str, Any]) -> Alert:
-        """Trigger the alert and return an Alert."""
+        """Trigger the alert and return an Alert.
+
+        A placeholder is a context key in braces, optionally with a format
+        spec. Extra surrounding braces are consumed, so templates written in
+        the older three-brace style still render cleanly: the previous
+        substitution matched only the inner two braces and left the outer
+        pair behind, which is why finished runs logged lines like
+        "best fitness {1531.19}". A spec was never applied at all, so the
+        elapsed time rendered as its own template text rather than a number.
+        """
         self._last_triggered = time.time()
-        message = self.message_template
-        for key, value in context.items():
-            message = message.replace(f"{{{{{key}}}}}", str(value))
+
+        def substitute(match: "re.Match") -> str:
+            key, spec = match.group(1), match.group(2)
+            if key not in context:
+                return match.group(0)
+            value = context[key]
+            if spec:
+                try:
+                    return format(value, spec[1:])
+                except (TypeError, ValueError):
+                    return str(value)
+            return str(value)
+
+        message = _PLACEHOLDER.sub(substitute, self.message_template)
         return Alert(
             alert_type=self.alert_type,
             level=self.level,
@@ -190,7 +216,7 @@ class AlertManager:
                 AlertType.CONVERGENCE,
                 AlertLevel.INFO,
                 lambda ctx: ctx.get("converged", False),
-                "Training converged at generation {{{generation}}} with best fitness {{{best_fitness}}}",
+                "Training converged at generation {generation} with best fitness {best_fitness}",
                 cooldown_sec=300,
             ),
             # Fitness milestone alert
@@ -198,7 +224,7 @@ class AlertManager:
                 AlertType.FITNESS_MILESTONE,
                 AlertLevel.INFO,
                 lambda ctx: ctx.get("fitness_improved", False) and ctx.get("improvement_pct", 0) > 10,
-                "Fitness improved by {{{improvement_pct:.1f}}}% at generation {{{generation}}}",
+                "Fitness improved by {improvement_pct:.1f}% at generation {generation}",
                 cooldown_sec=60,
             ),
             # Early stopping alert
@@ -206,7 +232,7 @@ class AlertManager:
                 AlertType.EARLY_STOP,
                 AlertLevel.WARNING,
                 lambda ctx: ctx.get("early_stop", False),
-                "Early stopping triggered at generation {{{generation}}} - no improvement for {{{patience}}} generations",
+                "Early stopping triggered at generation {generation} - no improvement for {patience} generations",
                 cooldown_sec=0,
             ),
             # Bottleneck alert
@@ -214,7 +240,7 @@ class AlertManager:
                 AlertType.BOTTLENECK,
                 AlertLevel.WARNING,
                 lambda ctx: ctx.get("bottleneck_severity", "low") in ("high", "critical"),
-                "Bottleneck detected: {{{bottleneck_type}}} with severity {{{bottleneck_severity}}}",
+                "Bottleneck detected: {bottleneck_type} with severity {bottleneck_severity}",
                 cooldown_sec=120,
             ),
             # Training complete alert
@@ -222,7 +248,7 @@ class AlertManager:
                 AlertType.TRAINING_COMPLETE,
                 AlertLevel.INFO,
                 lambda ctx: ctx.get("training_complete", False),
-                "Training complete: best fitness {{{best_fitness}}} after {{{total_gens}}} generations in {{{elapsed_min:.1f}}} minutes",
+                "Training complete: best fitness {best_fitness} after {total_gens} generations in {elapsed_min:.1f} minutes",
                 cooldown_sec=0,
             ),
         ]
