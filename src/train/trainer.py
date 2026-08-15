@@ -335,6 +335,9 @@ class EvolutionTrainer:
         self.best_agent_id: Optional[str] = None
         self.best_generation: int = 0
         self.patience_counter = 0
+        # Generation of the most recent checkpoint, so the final save at the
+        # end of training does not duplicate one just written.
+        self._last_checkpoint_gen: Optional[int] = None
 
         # Tournament state. The hall of fame holds (genome, metadata) for past
         # champions, which enter each tournament as benchmark opponents.
@@ -392,11 +395,21 @@ class EvolutionTrainer:
     def _setup_logging(self) -> None:
         """Attach a per-run file handler to the module logger."""
         log_file = self.runs_dir / "training.log"
-        handler = logging.FileHandler(log_file)
+        handler = logging.FileHandler(log_file, encoding="utf-8")
+        handler.setLevel(logging.INFO)
         handler.setFormatter(logging.Formatter(
             "%(asctime)s [%(levelname)s] %(name)s: %(message)s"
         ))
         logger.addHandler(handler)
+        # Without this the module logger inherits the root level, which is
+        # WARNING unless the caller configured logging. Every INFO record --
+        # i.e. the entire run history -- was dropped, and real runs left a
+        # training.log of zero bytes. The previous level is restored in
+        # close() so a trainer does not permanently reconfigure logging for
+        # the rest of the process.
+        self._previous_log_level = logger.level
+        if logger.level == logging.NOTSET or logger.level > logging.INFO:
+            logger.setLevel(logging.INFO)
         # Tracked so close() can detach it. The handler is added to a
         # module-level logger, so constructing several trainers in one process
         # otherwise stacks handlers (duplicating every line) and leaks an open
@@ -410,6 +423,9 @@ class EvolutionTrainer:
             logger.removeHandler(handler)
             handler.close()
             self._log_handler = None
+            previous = getattr(self, "_previous_log_level", None)
+            if previous is not None:
+                logger.setLevel(previous)
 
         runner = getattr(self, "runner", None)
         if runner is not None:
@@ -608,6 +624,14 @@ class EvolutionTrainer:
 
             elapsed = time.time() - gen_start
             logger.info(f"Generation {gen + 1} completed in {elapsed:.1f}s")
+            self.generation = gen + 1
+
+        # Always leave something to resume from. A run that is stopped early --
+        # or is simply shorter than checkpoint_interval -- otherwise ends with
+        # no checkpoint at all, and every generation of work is unreachable.
+        final_gen = self.generation - 1
+        if self.generation > 0 and self._last_checkpoint_gen != final_gen:
+            self._save_checkpoint(final_gen)
 
         # Final summary
         elapsed = time.time() - self._start_time
@@ -790,12 +814,34 @@ class EvolutionTrainer:
             ),
             "hall_of_fame": len(self.hall_of_fame),
             "elapsed": time.time() - self._start_time,
+            # Progress indicators that actually move. Tournament fitness is
+            # points per match within a closed field, so its mean sits near
+            # 0.5 by construction and looks flat no matter how much the
+            # population improves. Rating against the hall of fame does not.
+            "population_elo": self._population_elo(),
+            "hall_of_fame_elo": self._hall_of_fame_elo(),
         }
 
         try:
             callback(snapshot)
         except Exception:  # pragma: no cover - defensive
             logger.exception("on_generation callback failed; continuing training")
+
+    def _population_elo(self) -> Optional[float]:
+        """Mean rating of the current population's agents."""
+        ratings = [v for k, v in self.elo_ratings.items()
+                   if k.startswith("agent_")]
+        return float(np.mean(ratings)) if ratings else None
+
+    def _hall_of_fame_elo(self) -> Optional[float]:
+        """Mean rating of the past champions currently competing.
+
+        This is the number to watch: as the population outgrows its former
+        champions, their rating falls relative to the field.
+        """
+        ids = [meta["id"] for _, meta in self.hall_of_fame]
+        ratings = [self.elo_ratings[i] for i in ids if i in self.elo_ratings]
+        return float(np.mean(ratings)) if ratings else None
 
     def _comparable_score(self, record, results: List[MatchResult]) -> float:
         """A score for ``record`` that is comparable across generations.
@@ -1001,6 +1047,7 @@ class EvolutionTrainer:
         self.population.generation = gen + 1
         self.population.save_checkpoint(str(pop_path))
         self._save_trainer_state(gen_dir)
+        self._last_checkpoint_gen = gen
 
         # Save config
         config_path = gen_dir / "config.json"
@@ -1179,8 +1226,23 @@ class EvolutionTrainer:
 
         self.population.load_checkpoint(str(checkpoint_path))
         self.generation = self.population.generation
+
+        # The checkpoint decides the population size -- you cannot resume a
+        # 24-agent run as a 240-agent one. Reconcile the config so metrics and
+        # logs describe the run that is actually happening; a real run
+        # reported population_size 240 while training 24 agents.
+        restored = len(self.population)
+        if restored != self.config.population_size:
+            logger.warning(
+                "Checkpoint holds %d agents but population_size=%d was "
+                "requested; continuing with %d. Start a fresh run (or seed "
+                "from agents) to change population size.",
+                restored, self.config.population_size, restored)
+            self.config.population_size = restored
+            self.population.population_size = restored
+
         logger.info("Resumed population of %d from %s (generation %d)",
-                    len(self.population), checkpoint_path, self.generation)
+                    restored, checkpoint_path, self.generation)
 
         # Trainer-side state lives beside the population checkpoint.
         state_path = checkpoint_path.parent / "trainer_state.pt"

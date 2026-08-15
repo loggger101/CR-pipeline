@@ -395,12 +395,18 @@ class EvolutionaryAgent:
             path: File path to save to.
         """
         genome = None if self.weights is None else np.asarray(self.weights)
+        # Torch parameters are only written for agents that have no genome.
+        # Including them alongside a genome added ~37MB of numbers nothing
+        # reads: the simulator plays the genome, and the network is randomly
+        # initialised on a lazily-built agent anyway.
+        network_weights = (self.get_weights()
+                           if genome is None and self.has_network else None)
         payload = {
             "genome": genome,
             # "weights" is retained for readers that predate the genome split.
             "weights": genome if genome is not None else self.get_weights(),
             "param_kind": "genome" if genome is not None else "network",
-            "network_weights": self.get_weights() if self.has_network else None,
+            "network_weights": network_weights,
             "epsilon": self.epsilon,
             "total_actions": self.total_actions,
             "exploration_actions": self.exploration_actions,
@@ -471,13 +477,23 @@ class EvolutionaryAgent:
             self.network.reset()
 
     def update_best(self, fitness: float) -> None:
-        """Update best fitness tracking.
+        """Record this agent's best score and the parameters that scored it.
+
+        Snapshots the evolved genome when the agent has one. Calling
+        ``get_weights()`` unconditionally built the lazily-constructed 9.28M
+        parameter Torch network just to copy it, which turned every new best
+        into ~37MB of retained arrays and a matching blob in the checkpoint --
+        real runs produced 108MB ``best_agent.pt`` files for an 18KB genome.
 
         Args:
             fitness: Current fitness score.
         """
-        if fitness > self.best_fitness:
-            self.best_fitness = fitness
+        if fitness <= self.best_fitness:
+            return
+        self.best_fitness = fitness
+        if self.weights is not None:
+            self.best_weights = np.array(self.weights, copy=True)
+        elif self.has_network:
             self.best_weights = self.get_weights().copy()
 
     def __repr__(self) -> str:
