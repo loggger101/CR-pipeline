@@ -20,10 +20,11 @@ from .arena_canvas import ArenaCanvas
 from .chart import LineChart
 from .jobs import JobRunner
 from .operations import (
-    MATCH_DURATIONS, SCRIPTED_OPPONENTS, TOURNAMENT_FORMATS, build_training_config,
+    MATCH_DURATIONS, SCRIPTED_OPPONENTS, START_CONTINUE, START_FRESH,
+    START_MODES, START_SEED, TOURNAMENT_FORMATS, build_training_config,
     evaluate_against_scripted, evaluate_head_to_head, list_runs,
     load_agent_genome, load_run_history, new_run_dir, play_match,
-    resolve_runs_dir, run_training,
+    resolve_runs_dir, run_dir_for_resume, run_training,
 )
 
 BACKGROUND = "#161a21"
@@ -160,8 +161,9 @@ class Field(tk.Frame):
     def __init__(self, master, label: str, default: Any = "",
                  choices: Optional[List[str]] = None, width: int = 10):
         super().__init__(master, background=PANEL)
-        tk.Label(self, text=label, background=PANEL, foreground=MUTED,
-                 anchor="w", width=18).pack(side="left")
+        self.label = tk.Label(self, text=label, background=PANEL,
+                              foreground=MUTED, anchor="w", width=18)
+        self.label.pack(side="left")
         self.var = tk.StringVar(value=str(default))
         if choices:
             widget = ttk.Combobox(self, textvariable=self.var, values=choices,
@@ -173,6 +175,65 @@ class Field(tk.Frame):
 
     def get(self) -> str:
         return self.var.get()
+
+    def set_label(self, text: str) -> None:
+        self.label.configure(text=text)
+
+
+class RunPicker(tk.Toplevel):
+    """Small chooser listing runs that have a checkpoint to continue from."""
+
+    def __init__(self, master, runs: List[dict], target: tk.StringVar):
+        super().__init__(master)
+        self.title("Continue a run")
+        self.configure(background=PANEL)
+        self.geometry("620x320")
+        self.transient(master.winfo_toplevel())
+        self.target = target
+        self.runs = runs
+
+        tk.Label(self, text="Pick the run to carry on training",
+                 background=PANEL, foreground=TEXT,
+                 font=("Segoe UI", 10)).pack(anchor="w", padx=12, pady=(12, 6))
+
+        columns = ("run", "generations", "best")
+        self.tree = ttk.Treeview(self, columns=columns, show="headings",
+                                 height=9)
+        for column, heading, width in [
+            ("run", "Run", 330), ("generations", "Generations", 110),
+            ("best", "Best fitness", 120),
+        ]:
+            self.tree.heading(column, text=heading)
+            self.tree.column(column, width=width, anchor="w")
+        self.tree.pack(fill="both", expand=True, padx=12)
+
+        for run in runs:
+            best = ("-" if run["best_fitness"] is None
+                    else f"{run['best_fitness']:.3f}")
+            self.tree.insert("", "end", iid=run["path"],
+                             values=(run["run_id"], run["generations"], best))
+
+        buttons = tk.Frame(self, background=PANEL)
+        buttons.pack(fill="x", padx=12, pady=10)
+        ttk.Button(buttons, text="Continue this run", style="Accent.TButton",
+                   command=self._choose).pack(side="left")
+        ttk.Button(buttons, text="Browse instead...",
+                   command=self._browse).pack(side="left", padx=6)
+        ttk.Button(buttons, text="Cancel",
+                   command=self.destroy).pack(side="right")
+        self.tree.bind("<Double-1>", lambda _e: self._choose())
+
+    def _choose(self) -> None:
+        selection = self.tree.selection()
+        if selection:
+            self.target.set(selection[0])
+            self.destroy()
+
+    def _browse(self) -> None:
+        path = filedialog.askdirectory(title="Select a run directory")
+        if path:
+            self.target.set(path)
+            self.destroy()
 
 
 class LogPane(tk.Text):
@@ -216,6 +277,34 @@ class TrainingTab(tk.Frame):
         tk.Label(left, text="Training", background=PANEL, foreground=TEXT,
                  font=("Segoe UI", 12, "bold")).pack(anchor="w", pady=(0, 8))
 
+        # -- where the population comes from -------------------------------
+        self.start_mode = tk.StringVar(value=START_FRESH)
+        mode_row = tk.Frame(left, background=PANEL)
+        mode_row.pack(anchor="w", pady=(0, 4))
+        tk.Label(mode_row, text="Start from", background=PANEL,
+                 foreground=MUTED, anchor="w", width=18).pack(side="left")
+        ttk.Combobox(mode_row, textvariable=self.start_mode, values=START_MODES,
+                     state="readonly", width=24).pack(side="left")
+        self.start_mode.trace_add("write", lambda *_: self._toggle_start_mode())
+
+        self.source_frame = tk.Frame(left, background=PANEL)
+        self.source_frame.pack(anchor="w", fill="x", pady=(0, 4))
+
+        self.resume_run = tk.StringVar(value="")
+        self.resume_row = tk.Frame(self.source_frame, background=PANEL)
+        ttk.Button(self.resume_row, text="Pick run...",
+                   command=self._choose_run).pack(side="left")
+        tk.Label(self.resume_row, textvariable=self.resume_run, background=PANEL,
+                 foreground=ACCENT, anchor="w", width=30).pack(side="left", padx=6)
+
+        self.seed_agents: List[str] = []
+        self.seed_summary = tk.StringVar(value="none chosen")
+        self.seed_row = tk.Frame(self.source_frame, background=PANEL)
+        ttk.Button(self.seed_row, text="Pick agents...",
+                   command=self._choose_seed_agents).pack(side="left")
+        tk.Label(self.seed_row, textvariable=self.seed_summary, background=PANEL,
+                 foreground=ACCENT, anchor="w", width=30).pack(side="left", padx=6)
+
         self.fields: Dict[str, Field] = {}
         for key, label, default, choices in [
             ("population_size", "Population", 24, None),
@@ -247,6 +336,7 @@ class TrainingTab(tk.Frame):
             field.pack(anchor="w", pady=2)
             self.fields[key] = field
         self._toggle_mode()
+        self._toggle_start_mode()
 
         buttons = tk.Frame(left, background=PANEL)
         buttons.pack(anchor="w", pady=(14, 0))
@@ -283,17 +373,67 @@ class TrainingTab(tk.Frame):
             widget.configure(state="readonly" if (
                 state == "normal" and isinstance(widget, ttk.Combobox)) else state)
 
+    def _toggle_start_mode(self) -> None:
+        """Show the picker that matches the chosen start mode."""
+        mode = self.start_mode.get()
+        self.resume_row.pack_forget()
+        self.seed_row.pack_forget()
+        if mode == START_CONTINUE:
+            self.resume_row.pack(anchor="w", fill="x")
+        elif mode == START_SEED:
+            self.seed_row.pack(anchor="w", fill="x")
+
+        # Continuing trains N *more* generations; the label says which.
+        label = ("Extra generations" if mode == START_CONTINUE
+                 else "Generations")
+        self.fields["max_generations"].set_label(label)
+        # Population size is fixed by the checkpoint when continuing.
+        self.fields["population_size"].widget.configure(
+            state="disabled" if mode == START_CONTINUE else "normal")
+
+    def _choose_run(self) -> None:
+        """Pick a previous run to continue."""
+        runs = [r for r in list_runs(self.app.runs_dir) if r["generations"]]
+        if not runs:
+            path = filedialog.askdirectory(
+                title="Select a run directory to continue",
+                initialdir=self.app.runs_dir)
+            if path:
+                self.resume_run.set(path)
+            return
+        RunPicker(self, runs, self.resume_run)
+
+    def _choose_seed_agents(self) -> None:
+        paths = filedialog.askopenfilenames(
+            title="Select agent checkpoints to start from",
+            initialdir=self.app.runs_dir,
+            filetypes=[("Agent checkpoint", "*.pt"), ("All files", "*.*")])
+        if paths:
+            self.seed_agents = list(paths)
+            names = ", ".join(Path(p).parent.parent.name or Path(p).name
+                              for p in self.seed_agents[:2])
+            extra = ("" if len(self.seed_agents) <= 2
+                     else f" +{len(self.seed_agents) - 2}")
+            self.seed_summary.set(f"{len(self.seed_agents)}: {names}{extra}")
+
     def _values(self) -> Dict[str, Any]:
         values = {key: field.get() for key, field in self.fields.items()}
         values["tournament_mode"] = self.tournament_mode.get()
+        values["start_mode"] = self.start_mode.get()
+        values["resume_from"] = self.resume_run.get()
+        values["seed_agents"] = list(self.seed_agents)
         return values
 
     def _start(self) -> None:
+        values = self._values()
+        continuing = values["start_mode"] == START_CONTINUE
         try:
-            # Each run gets its own directory; the trainer writes generation
-            # checkpoints and best/ straight into it.
-            run_dir = new_run_dir(self.app.runs_dir)
-            config = build_training_config(self._values(), run_dir)
+            # Continuing writes back into the same run so its history and
+            # checkpoints stay in one place; anything else gets a new folder.
+            run_dir = (run_dir_for_resume(values["resume_from"]) if continuing
+                       and values["resume_from"]
+                       else new_run_dir(self.app.runs_dir))
+            config = build_training_config(values, run_dir)
         except (ValueError, OSError) as exc:
             messagebox.showerror("Check the settings", str(exc))
             return
@@ -303,6 +443,12 @@ class TrainingTab(tk.Frame):
         self.chart.clear()
         self.log.clear()
         self.progress.configure(maximum=config.max_generations, value=0)
+        if continuing:
+            self.log.append(f"Continuing {Path(run_dir).name} for "
+                            f"{config.additional_generations} more generations.")
+        elif config.seed_agents:
+            self.log.append(f"Seeding population from "
+                            f"{len(config.seed_agents)} agent(s).")
 
         started = self.app.start_job(
             "training", lambda ctx: run_training(ctx, config), self)

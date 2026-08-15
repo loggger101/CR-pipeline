@@ -13,6 +13,7 @@ from typing import Dict, List, Optional, Tuple
 
 import numpy as np
 
+from ..serialization import load_checkpoint
 from .agent import EvolutionaryAgent
 from .evolution import DiversityTracker
 from .policy import DEFAULT_POLICY_SPEC, PolicySpec
@@ -353,7 +354,7 @@ class Population:
         """
         import torch
 
-        checkpoint = torch.load(path)
+        checkpoint = load_checkpoint(path)
         self.generation = checkpoint["generation"]
         self.fitness_history = checkpoint["fitness_history"]
         self.diversity_history = checkpoint.get("diversity_history", [])
