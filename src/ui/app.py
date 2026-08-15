@@ -270,6 +270,7 @@ class TrainingTab(tk.Frame):
         self.app = app
         self.history: Dict[str, List[float]] = {"best": [], "mean": []}
         self.elo_series: List[float] = []
+        self.hof_series: List[float] = []
 
         left = tk.Frame(self, background=PANEL)
         left.pack(side="left", fill="y", padx=(12, 8), pady=12)
@@ -440,6 +441,7 @@ class TrainingTab(tk.Frame):
 
         self.history = {"best": [], "mean": []}
         self.elo_series = []
+        self.hof_series = []
         self.chart.clear()
         self.log.clear()
         self.progress.configure(maximum=config.max_generations, value=0)
@@ -482,20 +484,33 @@ class TrainingTab(tk.Frame):
         self.history["mean"].append(snapshot["mean_fitness"])
         self.progress.configure(value=snapshot["generation"])
 
-        elo = snapshot.get("champion_elo")
-        parts = [
-            f"gen {snapshot['generation']}/{snapshot['total_generations']}",
-            f"best {snapshot['best_fitness']:.3f}",
-            f"mean {snapshot['mean_fitness']:.3f}",
-        ]
-        if elo is not None:
-            parts.append(f"champion ELO {elo:.0f}")
-            self.elo_series.append(elo)
+        champion_elo = snapshot.get("champion_elo")
+        hof_elo = snapshot.get("hall_of_fame_elo")
+        parts = [f"gen {snapshot['generation']}/{snapshot['total_generations']}"]
+        if champion_elo is not None:
+            parts.append(f"champion ELO {champion_elo:.0f}")
+            self.elo_series.append(champion_elo)
+        if hof_elo is not None:
+            parts.append(f"past champions {hof_elo:.0f}")
+            self.hof_series.append(hof_elo)
+        parts.append(f"fitness {snapshot['best_fitness']:.3f}")
         if snapshot.get("champion_record"):
             parts.append(snapshot["champion_record"])
         self.headline.set("   ".join(parts))
 
-        series = dict(self.history)
+        # In tournament mode the fitness curve is points-per-match inside a
+        # closed field, so its mean is pinned near 0.5 however good the
+        # population gets. Ratings against the hall of fame are what show
+        # progress, so chart those when they exist.
+        if self.elo_series:
+            series = {"champion ELO": self.elo_series}
+            if self.hof_series:
+                series["past champions"] = self.hof_series
+            self.chart.set_labels("Rating by generation", "generation", "ELO")
+        else:
+            series = dict(self.history)
+            self.chart.set_labels("Fitness by generation", "generation",
+                                  "fitness")
         self.chart.plot(series)
         self.app.set_status(
             f"training: generation {snapshot['generation']}"

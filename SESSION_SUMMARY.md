@@ -363,6 +363,51 @@ train → save → continue → seed round trip.
 
 ---
 
+---
+
+## Round six: what two real runs revealed
+
+Inspecting actual runs on disk (240 agents / Swiss, and 24 agents / round-robin
+continued from an earlier run) surfaced four defects the whole test suite had
+been stepping around, because they are about *what a run leaves behind* rather
+than whether the code raises.
+
+| Symptom on disk | Cause |
+|---|---|
+| `best_agent.pt` was **108 MB** for an 18 KB genome | `update_best()` called `get_weights()`, which builds the lazily-created 9.28M-parameter Torch network just to copy it; `save_checkpoint` then wrote both `network_weights` and `best_weights` at 37 MB each |
+| An 11-generation run had **no checkpoint at all** | `checkpoint_interval` was 50 (the UI used `generations // 4`), so 19 minutes of training could not be continued |
+| `training.log` was **zero bytes** in both runs | The module logger's level was never set, so it inherited the root's WARNING and dropped every INFO record |
+| `metrics.json` said `population_size: 240` for a run training **24** agents | Resuming kept the requested size instead of the one the checkpoint actually holds |
+
+Fixes: the genome is snapshotted directly and Torch parameters are only written
+for agents that have no genome (108 MB → 58 KB); a checkpoint is always written
+when training ends or is stopped, and the UI checkpoints every 10 generations;
+the file handler sets its own level; and resume reconciles `population_size`
+with the checkpoint, warning when they differ.
+
+### Fitness cannot show progress in tournament mode
+
+Both runs looked flat: mean fitness moved from 0.664 to 0.700 across 61
+generations. That is not a training failure — it is arithmetic. Tournament
+fitness is points per match inside a closed field, so its mean is pinned near
+0.5 however strong the population becomes.
+
+The real signal was already in the data: hall-of-fame champions' ratings
+*decline* relative to the field as the population outgrows them (`hof_gen0`
+1483 → 1441, `hof_gen1` 1464 → 1422). Progress snapshots now carry
+`population_elo` and `hall_of_fame_elo`, and the Train tab charts ratings
+rather than the flat fitness curve.
+
+### A correction
+
+My first reading of these runs was that Swiss (103 s/generation) was slower
+than round-robin (28 s/generation) and therefore broken. It is not: the
+round-robin run had 24 agents and the Swiss run had 240. The run directory's
+`metrics.json` disagreed with its own `config.json` — which is what led to the
+misreported-population fix above.
+
+---
+
 ## Where to pick up
 
 1. **The frozen build is heavy.** PyTorch dominates the bundle. If size

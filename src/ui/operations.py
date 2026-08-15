@@ -172,7 +172,11 @@ def build_training_config(values: Dict[str, Any], runs_dir: str) -> TrainingConf
         runs_dir=runs_dir,
         curriculum_learning=False,
         diversity_preservation=False,
-        checkpoint_interval=max(1, as_int("max_generations") // 4),
+        # Checkpoint often enough that a stopped run is still worth
+        # continuing. A quarter of the run meant a 200-generation job wrote
+        # nothing until generation 50, so stopping at 11 left nothing to
+        # resume from.
+        checkpoint_interval=max(1, min(10, generations)),
     )
 
 
