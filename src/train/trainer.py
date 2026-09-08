@@ -116,6 +116,11 @@ class TrainingConfig:
     blend_alpha: float = 0.5
     mutation_strategy: str = "gaussian"
     mutation_rate: float = 0.05
+    # Cap on expected mutations per offspring (mutation_rate * genome_size).
+    # A per-weight rate implies more mutated coordinates as the policy grows,
+    # which drowns selection in short noisy runs; this keeps a large net at
+    # roughly one old-net's worth of drift. See scale_mutation_rate for data.
+    max_expected_mutations: float = 1400.0
     mutation_std: float = 0.1
     min_mutation_std: float = 0.01
     max_mutation_std: float = 0.5
@@ -188,9 +193,10 @@ class TrainingConfig:
     # Simulation config (overrides engine defaults via sim_game.yaml)
     sim_config_path: Optional[str] = None   # Path to sim_game.yaml; None → engine defaults
     # Evolved policy network shape. hidden_layers is the list of tanh hidden
-    # layer widths between features and outputs, e.g. [64, 48, 32]. None uses
-    # the default from models/policy.py (PolicySpec). The feature dimension is
-    # fixed by encode_features; only depth/width are tunable here.
+    # layer widths between features and outputs, read left-to-right (the first
+    # sits next to the feature vector), e.g. [96, 72, 56, 40]. None uses the
+    # default from models/policy.py (PolicySpec). The feature dimension is fixed
+    # by encode_features; only depth/width are tunable here.
     hidden_layers: Optional[List[int]] = None
     monitor_resources: bool = False
     monitor_sample_interval: float = 1.0
@@ -225,6 +231,7 @@ class TrainingConfig:
             "blend_alpha": self.blend_alpha,
             "mutation_strategy": self.mutation_strategy,
             "mutation_rate": self.mutation_rate,
+            "max_expected_mutations": self.max_expected_mutations,
             "mutation_std": self.mutation_std,
             "min_mutation_std": self.min_mutation_std,
             "max_mutation_std": self.max_mutation_std,
@@ -338,6 +345,7 @@ class EvolutionTrainer:
                 blend_alpha=config.blend_alpha,
                 mutation_strategy=config.mutation_strategy,
                 mutation_rate=config.mutation_rate,
+                max_expected_mutations=config.max_expected_mutations,
                 mutation_std=config.mutation_std,
                 min_mutation_std=config.min_mutation_std,
                 max_mutation_std=config.max_mutation_std,
@@ -380,6 +388,7 @@ class EvolutionTrainer:
                 elite_fraction=config.tournament_elite_fraction,
                 crossover_rate=config.crossover_rate,
                 mutation_rate=config.mutation_rate,
+                max_expected_mutations=config.max_expected_mutations,
                 mutation_std=config.mutation_std,
                 seed=config.seed,
                 champion_refinements=config.champion_refinements,

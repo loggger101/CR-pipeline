@@ -129,12 +129,13 @@ class TestSwissTournament:
         y = np.array([pos2[a] for a in ids], dtype=float)
 
         # Recalibrated 2026-09 (was > 0.3, calibrated on the single-hidden-layer policy).
-        # The multi-layer net (64-48-32) makes individual match outcomes noisier, so two
-        # independent tournaments over equally-random genomes correlate less: measured across
-        # seed pairs +0.58 / -0.24 / +0.06; this test's own pair is +0.06. We now only require
-        # the rankings not be systematically inverted, rather than strongly agreeing -- a weaker
-        # guard by explicit decision (see CR-pipeline notes). A stronger reproducibility guarantee
-        # would need more matches per pair to average out per-match noise.
+        # The multi-layer net then in use (64-48-32; since widened to a deeper funnel) makes
+        # individual match outcomes noisier, so two independent tournaments over equally-random
+        # genomes correlate less: measured across seed pairs +0.58 / -0.24 / +0.06; this test's
+        # own pair is +0.06. We now only require the rankings not be systematically inverted,
+        # rather than strongly agreeing -- a weaker guard by explicit decision (see CR-pipeline
+        # notes). A stronger reproducibility guarantee would need more matches per pair to
+        # average out per-match noise.
         assert np.corrcoef(x, y)[0, 1] > -0.1
 
     def test_elo_moves_away_from_the_default(self, runner):
@@ -370,8 +371,8 @@ class TestTrainingImprovesAbsolutely:
 
         # Recalibrated 2026-09 (was a bare `wins > losses`, calibrated on the single-hidden-layer
         # policy). Two problems with that: (a) under parity it fails ~59% of the time even between
-        # identical agents, so it was fragile by construction; (b) the multi-layer net (64-48-32)
-        # is noisier per match -- measured 9W/11L for this test's exact seeds and 7W/13L on a second
+        # identical agents, so it was fragile by construction; (b) the multi-layer net then in use
+        # (64-48-32; since widened to a deeper funnel) is noisier per match -- measured 9W/11L for this test's exact seeds and 7W/13L on a second
         # training seed, both noise-level parity rather than regression. The guard now tests its
         # actual intent: the champion must not be *statistically* weaker than its ancestor. An
         # exact one-sided binomial (alpha=0.10) flags <=6 wins of 20 as a genuine regression while

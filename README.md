@@ -489,6 +489,17 @@ achieved rather than only recombining this generation's field:
   light mutation have converged to near-clones, so a few slots are replaced with fresh
   random genomes. This is what breaks clone collapse when selection pressure gets too hot.
 
+- **Mutation-load cap (genome-size scaling).** `mutation_rate` is a probability *per
+  weight*, so the expected number of mutated coordinates per offspring is
+  `rate × genome_size` — which grows with the network even at an unchanged rate. Measured:
+  doubling parameters from 9,207 to 20,071 pushed that expectation from ~1,381 to ~3,011
+  mutations/child and made selection *worse* (mean-fitness trend flipped positive → negative
+  across seeds), while capping the rate back down restored improvement. So every mutation is
+  capped at `max_expected_mutations` (default 1400 ≈ one old-net's worth of drift): a no-op
+  for small/low-rate configs, and exactly what makes bigger genomes beneficial instead of
+  silently degrading evolution. Tune via `mutation.max_expected_mutations` in the YAML or
+  CLI `--max-expected-mutations N`; set it to 0 to disable the cap entirely.
+
 Every generation logs `elite / champion_refinements / immigrants / mutation_std / diversity`,
 and the trainer exposes them on `trainer.last_evolution_info` for the UI and tests:
 
@@ -557,7 +568,7 @@ not the deep Torch networks. This is deliberate:
 
 | | Evolved policy | Torch architectures |
 |---|---|---|
-| **Parameters** | 9,207 (default; configurable) | ~9.3M (CNN+LSTM) |
+| **Parameters** | 20,071 (default; configurable) | ~9.3M (CNN+LSTM) |
 | **Used for** | Every match in training | Architecture search, export, ensembling |
 | **Inference** | Pure NumPy, no allocation per tick | Torch forward pass |
 
@@ -565,13 +576,18 @@ Genomes are plain float vectors, so they ship to worker processes cheaply and
 evaluate thousands of times per match without rebuilding a model.
 
 ```
-observation (66 features)  ->  tanh(64) -> tanh(48) -> tanh(32)  ->  7 outputs
-                                                              (4 cards + pass + 2 placement coords)
+observation (66 features)  ->  tanh(96) -> tanh(72) -> tanh(56) -> tanh(40)  ->  7 outputs
+                                                                 (4 cards + pass + 2 placement coords)
 ```
 
 The hidden stack is configurable: `PolicySpec.hidden_dims` controls depth and width,
 and training accepts it via `--hidden-layers W...` or `population.hidden_layers` in
-`configs/evolution.yaml`. The default above yields 9,207 parameters.
+`configs/evolution.yaml`. The default above yields 20,071 parameters. It funnels
+wide-to-narrow on purpose — the broad first layer (96) sits next to the raw feature
+vector and captures interactions among them; each subsequent layer narrows as it
+abstracts toward the action head. Depth over uniform width: a deeper stack composes
+features, which is what game-state reasoning needs, while staying ~450x smaller than
+the Torch genomes that never influenced play.
 
 The 66 features cover elixir and crown state (plus king-tower-active and
 double-elixir-overtime flags), per-slot hand readiness and card kind, all six tower
@@ -583,7 +599,9 @@ tournaments rely on.
 `PolicySpec.num_params` is the contract between `Population` (which creates and
 mutates genomes) and the parallel runner (which executes them). Changing the
 spec in one place without the other raises a `ValueError` rather than silently
-misreading the vector.
+misreading the vector. Resuming a checkpoint trained under an older shape warns
+and starts fresh instead of misinterpreting the genome, so evolving to a bigger
+net does not corrupt existing runs.
 
 ### Evaluation: common random numbers
 

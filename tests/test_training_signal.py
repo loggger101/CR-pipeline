@@ -217,28 +217,112 @@ class TestEvolutionImproves:
         random numbers), which is what makes their fitness comparable; scoring
         each agent on its own seeds leaves the differences dominated by draw
         luck and selection sorts mostly noise.
+
+        Recalibrated 2026-09 for the multi-layer policy: a single population's
+        mean(last-3) vs mean(first-3) is too noisy to be a reliable guard once
+        per-match variance grows with network size -- measured on the new net,
+        that statistic flipped sign across seeds even while selection was
+        working (and it passed ~50% of the time under pure random drift). The
+        guard now compares two populations scored on identical match seeds: one
+        evolved by real fitness-driven selection and a control whose children are
+        fresh mutations of RANDOM parents (the population's ranking deliberately
+        ignored -- what evolution degenerates to if it stops using fitness). A
+        no-op regression makes the arms statistically identical, so their late-run
+        means must separate. Measured 2026-09 on the new net at matches=6 with a
+        5-generation window: every init seed separated (gaps +1.3..+3.5 vs pooled
+        SE ~0.7), while drift-vs-drift nulls stayed within noise (|gap| <= 0.74,
+        |t| < 1). A weaker guard by explicit decision, but it tests its actual
+        intent -- that selection carries signal -- rather than hoping a particular
+        3-generation window draws well.
         """
         pop_size = 12
-        pop = Population(population_size=pop_size, elite_count=3)
-        pop.initialize(seed=5)
-        evolution = EvolutionStrategy(EvolutionConfig(
-            population_size=pop_size, elite_count=3,
-            mutation_rate=0.15, mutation_std=0.12, crossover_rate=0.6,
-            seed=11,
-        ))
 
-        means = []
-        for generation in range(10):
-            genomes = pop.get_population_weights()
-            generation_seed = 200 + generation * 1000
-            scores = [_fitness(g, seed=generation_seed, matches=3)
-                      for g in genomes]
-            pop.evaluate(scores)
-            means.append(float(np.mean(scores)))
-            new_genomes, _info = evolution.evolve(genomes, scores)
-            pop.set_population_weights(new_genomes)
+        def _make_pop(spec):
+            pop = Population(population_size=pop_size, elite_count=3)
+            if getattr(pop, "policy_spec", None) is not spec:
+                rng = np.random.RandomState(5)
+                from src.models.agent import EvolutionaryAgent
+                from src.models.population import AgentRecord
+                pop.policy_spec = spec
+                pop.agents = []
+                for i in range(pop_size):
+                    genome = spec.random_genome(rng)
+                    agent = EvolutionaryAgent(weights=genome,
+                                              seed=rng.randint(0, 2**31))
+                    pop.agents.append(AgentRecord(agent_id=f"agent_{i}",
+                                                  agent=agent, genome=genome,
+                                                  fitness=0.0, generation_born=0))
+                pop.generation = 0
+            else:
+                pop.initialize(seed=5)
+            return pop
 
-        assert np.mean(means[-3:]) > np.mean(means[:3])
+        spec = DEFAULT_POLICY_SPEC
+        # _ensure_compiled re-imports the module default on every call; point it
+        # at this test's explicit spec so both arms compile identically.
+        import src.models.policy as policy_module
+        previous_spec = policy_module.DEFAULT_POLICY_SPEC
+        policy_module.DEFAULT_POLICY_SPEC = spec
+        try:
+            pop_evo = _make_pop(spec)
+            pop_drift = _make_pop(spec)   # identical starting population
+
+            evolution = EvolutionStrategy(EvolutionConfig(
+                population_size=pop_size, elite_count=3,
+                mutation_rate=0.15, mutation_std=0.12, crossover_rate=0.6,
+                seed=11))
+
+            class _Drift:
+                """Control arm: children are fresh mutations of RANDOM parents --
+                the population's fitness ranking is deliberately ignored."""
+
+                def __init__(self):
+                    self.rng = np.random.RandomState(7)
+
+                def evolve(self, genomes, scores):
+                    out = []
+                    for _ in range(len(genomes)):
+                        parent = genomes[self.rng.randint(len(genomes))]
+                        out.append(parent + self.rng.randn(parent.size) * 0.12)
+                    return out, {}
+
+            drift = _Drift()
+
+            evo_means, drift_means = [], []
+            for generation in range(10):
+                genomes_e = pop_evo.get_population_weights()
+                genomes_d = pop_drift.get_population_weights()
+                # Same match seeds both arms (common random numbers), so the only
+                # difference between them is whether selection used fitness.
+                scores_e = [_fitness(g, seed=200 + generation * 1000, matches=6)
+                            for g in genomes_e]
+                scores_d = [_fitness(g, seed=200 + generation * 1000, matches=6)
+                            for g in genomes_d]
+
+                pop_evo.evaluate(scores_e)
+                pop_drift.evaluate(scores_d)
+                evo_means.append(float(np.mean(scores_e)))
+                drift_means.append(float(np.mean(scores_d)))
+
+                new_g, _info = evolution.evolve(genomes_e, list(scores_e))
+                pop_evo.set_population_weights(new_g)
+                new_d, _info = drift.evolve(genomes_d, list(scores_d))
+                pop_drift.set_population_weights(new_d)
+
+            e_late = np.array(evo_means[-5:])
+            d_late = np.array(drift_means[-5:])
+            gap = float(np.mean(e_late) - np.mean(d_late))
+            pooled_se = float(
+                np.sqrt((np.var(e_late, ddof=1) + np.var(d_late, ddof=1)) / 5.0))
+
+            assert gap >= pooled_se, (
+                f"selection carried no signal: evolved population's late-run mean "
+                f"{float(np.mean(e_late)):.4f} did not beat the drift control's "
+                f"{float(np.mean(d_late)):.4f} by at least one pooled SE "
+                f"(gap={gap:+.4f}, SE={pooled_se:.4f}); evolution is sorting noise"
+            )
+        finally:
+            policy_module.DEFAULT_POLICY_SPEC = previous_spec
 
     def test_elites_survive_a_generation(self):
         pop_size = 8

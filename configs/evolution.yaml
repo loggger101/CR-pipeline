@@ -9,11 +9,14 @@ population:
   size: 200                    # Number of agents per generation
   elite_count: 10              # Top agents preserved unchanged each generation
   elite_preservation: true     # Whether to preserve elites
-  hidden_layers: [64, 48, 32]  # Hidden layer widths of the evolved policy net.
-                               # Each entry is a tanh layer; features -> layers -> outputs.
+  hidden_layers: [96, 72, 56, 40]   # Hidden layer widths of the evolved policy net.
+                               # Each entry is a tanh layer; features -> layers -> outputs,
+                               # read left-to-right (first sits next to the feature vector).
+                               # The default funnels wide->narrow: broad first layer for raw-
+                               # feature interaction, narrowing toward the action head.
                                # Deeper/wider = more capacity (and slower eval):
                                #   wide single layer:    hidden_layers: [128]
-                               #   deep default x2:      hidden_layers: [96, 96, 64, 32]
+                               #   one deeper than def:  hidden_layers: [96, 72, 56, 40, 32]
 
 # ── Selection Strategy ──────────────────────────────────────────────────────
 selection:
@@ -32,6 +35,12 @@ crossover:
 mutation:
   strategy: "gaussian"         # Options: gaussian, uniform, adaptive
   rate: 0.05                   # Probability per weight to mutate
+                               # NOTE: expected mutations per offspring = rate x genome_size,
+                               # so a fixed rate mutates MORE as the policy grows -- which
+                               # drowns selection instead of improving it (measured). The cap
+                               # below keeps per-child drift bounded regardless of size.
+  max_expected_mutations: 1400 # Cap on expected mutations/child (rate x genome_size);
+                               # set to 0 to disable the cap entirely
   std: 0.1                     # Standard deviation of Gaussian noise
   min_std: 0.01                # Minimum mutation std (adaptive mode)
   max_std: 0.5                 # Maximum mutation std (adaptive mode)
