@@ -177,6 +177,14 @@ class TrainingConfig:
     tournament_elite_fraction: float = 0.1
     tournament_rounds: Optional[int] = None   # None -> ceil(log2(entrants))
     hall_of_fame_size: int = 4
+    # Advanced GA (tournament mode): how many offspring per generation are
+    # gentle mutations of the run's best genome -- the exploitation channel that
+    # lets each generation build directly on the previous one.
+    champion_refinements: int = 2
+    # Widen mutation automatically when no new best lands for ga_stagnation_window
+    # generations (bounded by min/max_mutation_std); shrinks back on progress.
+    ga_adaptive_mutation: bool = True
+    ga_stagnation_window: int = 8
     # Simulation config (overrides engine defaults via sim_game.yaml)
     sim_config_path: Optional[str] = None   # Path to sim_game.yaml; None → engine defaults
     # Evolved policy network shape. hidden_layers is the list of tanh hidden
@@ -256,6 +264,9 @@ class TrainingConfig:
             "tournament_format": self.tournament_format,
             "tournament_matches": self.tournament_matches,
             "tournament_elite_fraction": self.tournament_elite_fraction,
+            "champion_refinements": self.champion_refinements,
+            "ga_adaptive_mutation": self.ga_adaptive_mutation,
+            "ga_stagnation_window": self.ga_stagnation_window,
             # Simulation config override
             "sim_config_path": self.sim_config_path,
             # Policy network shape (None = default spec)
@@ -360,11 +371,22 @@ class EvolutionTrainer:
                 matches_per_agent=config.tournament_matches,
                 runner=self.runner,
             )
+            # crossover/mutation rates come from config too -- before 2026-09
+            # they fell back to the strategy's hardcoded defaults, so a run
+            # configured with mutation_rate 0.15 silently evolved at 0.05.
             self.tournament_strategy = TournamentEvolutionStrategy(
                 tournament_format=config.tournament_format,
                 matches_per_pair=config.tournament_matches,
                 elite_fraction=config.tournament_elite_fraction,
+                crossover_rate=config.crossover_rate,
+                mutation_rate=config.mutation_rate,
+                mutation_std=config.mutation_std,
                 seed=config.seed,
+                champion_refinements=config.champion_refinements,
+                adaptive_mutation=config.ga_adaptive_mutation,
+                min_mutation_std=config.min_mutation_std,
+                max_mutation_std=config.max_mutation_std,
+                stagnation_window=config.ga_stagnation_window,
             )
             logger.info("Tournament mode enabled")
 
@@ -399,6 +421,10 @@ class EvolutionTrainer:
         self.elo_ratings: Dict[str, float] = {}
         self.elo_history: Dict[str, List[float]] = {}
         self.last_tournament = None
+        # Info dict from the most recent evolve() call (elite indices, live
+        # mutation std, champion refinements used, immigrants). Exposed so the
+        # UI/tests can see what the GA actually did each generation.
+        self.last_evolution_info: Optional[dict] = None
 
         # Optional observer called once per generation with a progress dict.
         # Set it directly on the instance; see _emit_progress for the payload.
@@ -551,6 +577,9 @@ class EvolutionTrainer:
 
             gen_start = time.time()
             logger.info(f"=== Generation {gen + 1} / {self.config.max_generations} ===")
+            # Did this generation produce a new best? Feeds adaptive mutation in
+            # the tournament strategy (widen while flat, shrink on progress).
+            improved_this_generation = False
 
             # 1. Evaluate fitness
             weights = self.population.get_population_weights()
@@ -577,6 +606,7 @@ class EvolutionTrainer:
             if current_best is not None and current_score > self.best_fitness:
                 improvement = current_score - self.best_fitness
                 if improvement >= self.config.early_stopping_min_improvement:
+                    improved_this_generation = True
                     self.patience_counter = 0
                     self.best_fitness = current_score
                     self.best_agent = current_best
@@ -681,13 +711,18 @@ class EvolutionTrainer:
                 # Fitness already *is* the tournament standing, so selection on
                 # it is tournament-driven evolution. Handing the population to
                 # TournamentEvolutionStrategy here would run a second full
-                # tournament and pay for the matchmaking twice.
+                # tournament and pay for the matchmaking twice. The champion's
+                # genome (updated in step 4 above if this generation found a new
+                # best) seeds the exploitation channel: each generation carries
+                # refined copies of everything its predecessors achieved.
                 new_weights, evolution_info = self.tournament_strategy.evolve(
                     population=population_weights,
                     weights_list=population_weights,
                     current_fitnesses=fitnesses,
                     evaluator=None,
                     generation=gen,
+                    champion_genome=self.best_genome,
+                    improved_this_generation=improved_this_generation,
                 )
                 if self.last_tournament is not None:
                     ratings = self.last_tournament.elo_ratings
@@ -704,6 +739,7 @@ class EvolutionTrainer:
                     avg_fitness=avg_fitness,
                 )
             self.population.set_population_weights(new_weights)
+            self.last_evolution_info = evolution_info
             self.population.generation = gen + 1
 
             elapsed = time.time() - gen_start

@@ -458,6 +458,46 @@ Two things prevent that:
 final champion must beat the generation-0 champion head to head. That cannot be
 satisfied by relative drift.
 
+### How each generation builds on the last
+
+A plain "select → crossover → mutate" loop can stall: once selection pressure is
+strong, every child descends from a handful of near-clones and there's nothing new
+for the next tournament to select on. Four mechanisms keep progress moving —
+each one makes the *next* generation explicitly depend on what the previous ones
+achieved rather than only recombining this generation's field:
+
+- **Champion refinement (exploitation channel).** Each generation, a few offspring
+  (`champion_refinements`, default 2) are gentle mutations of the run's best genome
+  so far. This is the direct "improve from the last" path — the current champion's
+  genes enter every future population and get refined in place instead of being left
+  to chance recombination. Set `champion_refinements=0` (or CLI `--champion-refinements 0`)
+  to disable it.
+
+- **Tempered selection.** Parents are drawn by a softmax over *z-scored* standings at
+  a real temperature, not raw scores scaled near-zero. The pre-fix code was effectively
+  argmax: one agent took ~all parent draws and the population collapsed to its clones
+  within a few generations. Now the top agent gets a strong but finite share of draws
+  while mid-field agents still breed — selection pressure without premature convergence.
+
+- **Adaptive mutation.** While no new best lands, the live mutation σ holds; after
+  `ga_stagnation_window` flat generations (default 8) it doubles (bounded by
+  `min/max_mutation_std`) so search widens instead of grinding in place. Progress decays
+  it back toward the configured baseline. On by default (`--no-adaptive-mutation` to turn off).
+
+- **Immigration (collapse guard).** The first generation records the population's diversity
+  as a scale-free baseline; if a later one falls below ~25% of that, blend-crossover and
+  light mutation have converged to near-clones, so a few slots are replaced with fresh
+  random genomes. This is what breaks clone collapse when selection pressure gets too hot.
+
+Every generation logs `elite / champion_refinements / immigrants / mutation_std / diversity`,
+and the trainer exposes them on `trainer.last_evolution_info` for the UI and tests:
+
+```python
+info = trainer.last_evolution_info
+# {'champion_refinements_used': 2, 'immigrants': 0,
+#  'mutation_std': 0.1, 'stagnation_counter': 3, ...}
+```
+
 ### Other formats
 
 | Format | Description | Use Case |

@@ -133,6 +133,18 @@ def main():
         seed=args.seed,
     )
 
+    # Optional GA-dynamics overrides from the yaml (absent keys keep the
+    # TrainingConfig defaults). Explicit 0 is a real value: it disables the
+    # champion channel, so test for None rather than truthiness.
+    _dyn = evolution_config.get("ga_dynamics") or {}
+    if (_ref := evolution_config.get("tournament", {}).get(
+            "champion_refinements")) is not None:
+        training_config.champion_refinements = int(_ref)
+    if "adaptive_mutation" in _dyn:
+        training_config.ga_adaptive_mutation = bool(_dyn["adaptive_mutation"])
+    if "stagnation_window" in _dyn:
+        training_config.ga_stagnation_window = int(_dyn["stagnation_window"])
+
     # Override with CLI args
     if args.max_gens:
         training_config.max_generations = args.max_gens
