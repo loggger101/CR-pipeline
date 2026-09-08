@@ -36,11 +36,16 @@ class TestPolicySpec:
         spec = PolicySpec(feature_dim=10, hidden_dims=(7, 5), num_outputs=2)
         assert spec.num_params == (10 * 7 + 7) + (7 * 5 + 5) + (5 * 2 + 2)
 
-    def test_default_spec_is_three_hidden_layers(self):
-        """The evolved policy must have more than one hidden layer."""
-        assert DEFAULT_POLICY_SPEC.hidden_dims == (64, 48, 32)
-        # 66 -> 64 -> 48 -> 32 -> 7.
-        expected = (66 * 64 + 64) + (64 * 48 + 48) + (48 * 32 + 32) + (32 * 7 + 7)
+    def test_default_spec_is_four_layer_funnel(self):
+        """The evolved policy must be deeper than the old single layer.
+
+        The current default funnels wide-to-narrow (96 -> 72 -> 56 -> 40) so a
+        broad first layer captures interactions among the raw features before
+        abstracting toward the action head."""
+        assert DEFAULT_POLICY_SPEC.hidden_dims == (96, 72, 56, 40)
+        # 66 -> 96 -> 72 -> 56 -> 40 -> 7.
+        expected = ((66 * 96 + 96) + (96 * 72 + 72) + (72 * 56 + 56)
+                    + (56 * 40 + 40) + (40 * 7 + 7))
         assert DEFAULT_POLICY_SPEC.num_params == expected
 
     def test_random_genome_has_exact_length(self):
@@ -75,8 +80,8 @@ class TestPolicySpec:
         from src.models.policy import make_spec
         wide = make_spec((128,))
         assert wide.hidden_dims == (128,)
-        deep = make_spec((96, 96, 64))
-        assert deep.num_params > wide.num_params > DEFAULT_POLICY_SPEC.num_params
+        deep = make_spec((96, 72, 56, 40, 32))   # one layer deeper than default
+        assert deep.num_params > DEFAULT_POLICY_SPEC.num_params
 
 
 class TestPolicyForward:

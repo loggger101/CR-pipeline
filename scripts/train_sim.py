@@ -109,6 +109,8 @@ def main():
         blend_alpha=evolution_config.get("crossover", {}).get("blend_alpha", 0.5),
         mutation_strategy=evolution_config.get("mutation", {}).get("strategy", "gaussian"),
         mutation_rate=evolution_config.get("mutation", {}).get("rate", 0.05),
+        max_expected_mutations=float(
+            evolution_config.get("mutation", {}).get("max_expected_mutations", 1400)),
         mutation_std=evolution_config.get("mutation", {}).get("std", 0.1),
         min_mutation_std=evolution_config.get("mutation", {}).get("min_std", 0.01),
         max_mutation_std=evolution_config.get("mutation", {}).get("max_std", 0.5),

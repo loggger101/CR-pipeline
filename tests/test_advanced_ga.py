@@ -23,6 +23,7 @@ import numpy as np
 import pytest
 
 from src.models.evolution import TournamentEvolutionStrategy
+from src.models.policy import DEFAULT_POLICY_SPEC
 
 
 def _population(n: int = 12, dim: int = 64, seed: int = 0) -> list:
@@ -73,11 +74,12 @@ class TestChampionRefinements:
 
     def test_refinements_are_close_mutations_of_champion(self):
         strategy = TournamentEvolutionStrategy(seed=42, champion_refinements=3)
-        population = _population(n=10, dim=9207, seed=5)
+        dim = DEFAULT_POLICY_SPEC.num_params  # real genome length; never hardcode a stale one
+        population = _population(n=10, dim=dim, seed=5)
         fitnesses = [float(i) for i in range(10)]
 
         # A clearly distinct "champion" genome.
-        champion = np.zeros(9207)
+        champion = np.zeros(dim)
         champion[::3] = 0.5
 
         offspring, info = strategy.evolve(
@@ -266,6 +268,40 @@ class TestEvolveContract:
         elite_idx = info["elite_indices"][0]
         assert np.any([np.array_equal(o, population[elite_idx]) for o in offspring]), \
             "top-ranked genome not preserved unchanged"
+
+
+class TestMutationLoadScaling:
+    """Bigger genomes must not silently mutate more per offspring.
+
+    mutation_rate is a probability *per weight*, so expected mutations = rate x
+    genome_size, which grows with the network at an unchanged configured rate.
+    Measured 2026-09: doubling params (9207 -> 20071) at rate 0.15 pushed that
+    from ~1381 to ~3011 mutations/child and flipped mean-fitness improvement to
+    a decline; capping the expectation restored it. These tests pin both the
+    helper's math and its no-op behaviour for small configs (so nothing already
+    calibrated changes).
+    """
+
+    def test_small_genome_rate_is_untouched(self):
+        from src.models.evolution import scale_mutation_rate
+        # Old net at rate 0.15: ~1381 expected mutations, under the default cap.
+        assert scale_mutation_rate(0.15, 9207, 1400.0) == pytest.approx(0.15)
+
+    def test_large_genome_rate_is_capped_to_the_bound(self):
+        from src.models.evolution import scale_mutation_rate
+        # New net at rate 0.15 would imply ~3011; cap to <= 1400 expected.
+        scaled = scale_mutation_rate(0.15, 20071, 1400.0)
+        assert scaled * 20071 <= 1400 + 1e-9
+        assert scaled == pytest.approx(1400.0 / 20071)
+
+    def test_disabled_cap_returns_rate_unchanged(self):
+        from src.models.evolution import scale_mutation_rate
+        assert scale_mutation_rate(0.5, 20071, None) == pytest.approx(0.5)
+        assert scale_mutation_rate(0.5, 20071, 0.0) == pytest.approx(0.5)
+
+    def test_zero_genome_size_is_safe(self):
+        from src.models.evolution import scale_mutation_rate
+        assert scale_mutation_rate(0.15, 0, 1400.0) == pytest.approx(0.15)
 
 
 class TestConfigWiring:

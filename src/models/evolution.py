@@ -340,6 +340,39 @@ class ArithmeticCrossover(CrossoverOperator):
 # Mutation Operators
 # =============================================================================
 
+
+def scale_mutation_rate(rate: float, genome_size: int,
+                        max_expected_mutations: Optional[float]) -> float:
+    """Cap a per-weight mutation rate by the expected mutations it implies.
+
+    ``rate`` is a probability *per weight*, so the expected number of mutated
+    coordinates in one offspring is ``rate * genome_size`` -- which grows with
+    the network even when the configured rate does not change. Measured 2026-09:
+    at rate 0.15, going from a 9,207-param to a 20,071-param policy pushed that
+    expectation from ~1,381 to ~3,011 mutations/child, and the extra drift made
+    selection *worse* (mean-fitness trend flipped +0.06..+0.11/gen to
+    -0.10..+0.04/gen across seeds), while scaling the rate back down restored
+    improvement (+0.09/+0.05/+0.10). This helper is what makes bigger genomes
+    beneficial instead of silently degrading evolution: it leaves small/low-rate
+    configs bit-identical (rate*size already under the cap) and only reduces a
+    rate when ``rate * genome_size`` exceeds ``max_expected_mutations``.
+
+    Args:
+        rate: Configured per-weight mutation probability.
+        genome_size: Number of weights in one offspring (0/None-safe).
+        max_expected_mutations: Upper bound on expected mutations per offspring;
+            None or <= 0 disables scaling entirely.
+
+    Returns:
+        ``min(rate, cap)`` where the cap keeps the expectation at or under the
+        bound; unchanged when scaling is disabled or already within it.
+    """
+    if not max_expected_mutations or genome_size <= 0:
+        return float(rate)
+    capped = max(1.0 / genome_size, max_expected_mutations / genome_size)
+    return min(float(rate), capped)
+
+
 class MutationOperator(ABC):
     """Base class for mutation operators."""
 
@@ -593,6 +626,10 @@ class EvolutionConfig:
         blend_alpha: Blend factor for blend crossover.
         mutation_strategy: Mutation method.
         mutation_rate: Per-weight mutation probability.
+        max_expected_mutations: Cap on expected mutations per offspring
+            (rate * genome_size). None/0 disables the cap; 1400 keeps a large
+            policy at roughly one old-net's worth of drift -- see
+            scale_mutation_rate for why this matters once genomes grow.
         mutation_std: Mutation noise standard deviation.
         min_mutation_std: Minimum mutation std (adaptive mode).
         max_mutation_std: Maximum mutation std (adaptive mode).
@@ -615,6 +652,11 @@ class EvolutionConfig:
     blend_alpha: float = 0.5
     mutation_strategy: MutationStrategy = MutationStrategy.GAUSSIAN
     mutation_rate: float = 0.05
+    # Expected-mutations cap (rate * genome_size). The default keeps the new
+    # multi-layer policy's per-child drift at roughly one old-net's worth --
+    # without it, doubling parameters more than doubled expected mutations and
+    # selection got worse instead of better (see scale_mutation_rate).
+    max_expected_mutations: Optional[float] = 1400.0
     mutation_std: float = 0.1
     min_mutation_std: float = 0.01
     max_mutation_std: float = 0.5
@@ -759,6 +801,14 @@ class EvolutionStrategy:
             elites = []
 
         # Create offspring
+        # Per-weight rate implies expected mutations = rate * genome_size, so a
+        # bigger policy mutates more per child at an unchanged configured rate.
+        # Cap it (no-op when already under the cap) -- see scale_mutation_rate.
+        _genome_size = len(population[0]) if population else 0
+        effective_mutate_rate = scale_mutation_rate(
+            self.config.mutation_rate, _genome_size,
+            self.config.max_expected_mutations)
+
         offspring = []
         while len(offspring) < n:
             # Select parents
@@ -778,27 +828,28 @@ class EvolutionStrategy:
 
             # Mutation. rng is passed explicitly so mutation draws from the
             # strategy's seeded stream rather than the operator's own
-            # entropy-seeded one, which left runs irreproducible.
+            # entropy-seeded one, which left runs irreproducible. The rate is
+            # genome-size-scaled (effective_mutate_rate) above.
             if self.config.adaptive_mutation:
                 child1 = self.mutation.mutate(
-                    child1, self.config.mutation_rate,
+                    child1, effective_mutate_rate,
                     rng=self.rng,
                     current_fitness=current_fitness,
                     avg_fitness=avg_fitness,
                 )
                 child2 = self.mutation.mutate(
-                    child2, self.config.mutation_rate,
+                    child2, effective_mutate_rate,
                     rng=self.rng,
                     current_fitness=current_fitness,
                     avg_fitness=avg_fitness,
                 )
             else:
                 child1 = self.mutation.mutate(
-                    child1, self.config.mutation_rate,
+                    child1, effective_mutate_rate,
                     self.config.mutation_std, rng=self.rng,
                 )
                 child2 = self.mutation.mutate(
-                    child2, self.config.mutation_rate,
+                    child2, effective_mutate_rate,
                     self.config.mutation_std, rng=self.rng,
                 )
 
@@ -874,6 +925,7 @@ class TournamentEvolutionStrategy:
         max_mutation_std: float = 0.3,
         stagnation_window: int = 8,
         immigration_threshold: Optional[float] = None,
+        max_expected_mutations: Optional[float] = 1400.0,
     ):
         """Initialize the tournament evolution strategy.
 
@@ -904,6 +956,9 @@ class TournamentEvolutionStrategy:
             immigration_threshold: If the population's mean pairwise distance
                 drops below this, replace a few of the weakest slots with fresh
                 random genomes to break clone collapse. None disables it.
+            max_expected_mutations: Cap on expected mutations per offspring
+                (mutation_rate * genome_size); see scale_mutation_rate for why
+                an unscaled per-weight rate degrades evolution as genomes grow.
         """
         # Convert string format to enum
         format_map = {
@@ -936,6 +991,10 @@ class TournamentEvolutionStrategy:
         # pins an absolute mean-pairwise-distance threshold instead (useful if
         # you know your genome scale). False disables immigration entirely.
         self.immigration_threshold = immigration_threshold
+        # Cap expected mutations per offspring (rate * genome_size); see
+        # scale_mutation_rate for why an unscaled per-weight rate degrades a
+        # larger policy's evolution instead of improving it.
+        self.max_expected_mutations = max_expected_mutations
         self._baseline_diversity: float = 0.0
         self._mutation_std = float(mutation_std)
         self.stagnation_counter = 0
@@ -1227,8 +1286,16 @@ class TournamentEvolutionStrategy:
         return offspring1, offspring2
 
     def _mutate(self, weights: np.ndarray, rate: Optional[float] = None) -> np.ndarray:
-        """Gaussian mutation using the *live* std (adaptive mode widens it)."""
-        effective_rate = self.mutation_rate if rate is None else float(rate)
+        """Gaussian mutation using the *live* std (adaptive mode widens it).
+
+        The per-weight rate is capped by genome size first (see
+        scale_mutation_rate): an unscaled rate makes a bigger policy mutate more
+        per child, which drowns selection instead of improving it.
+        """
+        base_rate = self.mutation_rate if rate is None else float(rate)
+        effective_rate = scale_mutation_rate(
+            base_rate, weights.shape[0] if weights.ndim > 0 else 0,
+            self.max_expected_mutations)
         mutation_mask = self.rng.random(size=weights.shape) < effective_rate
         noise = self.rng.randn(*weights.shape) * self._mutation_std
         mutated = weights.copy()

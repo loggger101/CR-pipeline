@@ -69,6 +69,7 @@ def cmd_train(args: argparse.Namespace) -> int:
         max_generations=args.max_gens,
         crossover_rate=args.crossover_rate,
         mutation_rate=args.mutation_rate,
+        max_expected_mutations=float(args.max_expected_mutations),
         mutation_std=args.mutation_std,
         tournament_mode=args.tournament,
         tournament_format=args.tournament_format,
@@ -681,6 +682,10 @@ Examples:
     train_parser.add_argument("--crossover-rate", type=float, default=0.7)
     train_parser.add_argument("--mutation-rate", type=float, default=0.05)
     train_parser.add_argument("--mutation-std", type=float, default=0.1)
+    # Cap on expected mutations per offspring (rate x genome_size). A fixed
+    # per-weight rate mutates more as the policy grows, which drowns selection;
+    # this keeps per-child drift bounded for large nets. 0 disables the cap.
+    train_parser.add_argument("--max-expected-mutations", type=float, default=1400)
     # Tournament self-play is the project's main training loop and the
     # TrainingConfig default; the CLI must not silently fall back to scripted
     # opponents. Opt out explicitly with --no-tournament.
@@ -709,7 +714,7 @@ Examples:
     train_parser.add_argument("--hidden-layers", type=int, nargs="+", default=None,
                               metavar="WIDTH",
                               help="Hidden layer widths of the evolved policy net "
-                                   "(default: 64 48 32). E.g. --hidden-layers 128 for a wide single layer.")
+                                   "(default: 96 72 56 40). E.g. --hidden-layers 128 for a wide single layer.")
     train_parser.add_argument("--champion-refinements", type=int, default=None, metavar="N",
                               help="Offspring per generation that are gentle mutations of the run's "
                                    "best genome (default: 2; set 0 to disable)")

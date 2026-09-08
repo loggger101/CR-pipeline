@@ -12,10 +12,12 @@ Design constraints that shape what is here:
   evaluated thousands of times per match. Rebuilding a Torch module per worker
   (or per tick) would dominate runtime, and Torch modules pickle poorly.
 * **Small enough for evolution, deep enough to play.** The genome is a flat
-  vector over an N-hidden-layer tanh MLP: the default shape is 66 -> 64 -> 48
-  -> 32 -> 7 (9,207 parameters). That is ~4x more capacity than the old
-  single-32 layer (2,311 params) while staying far below the 9.28M-parameter
-  Torch genomes the previous code path evolved -- none of which influenced play.
+  vector over an N-hidden-layer tanh MLP: the default shape is 66 -> 96 -> 72
+  -> 56 -> 40 -> 7 (20,071 parameters). That is ~2.2x more capacity than the
+  previous three-layer net (9,207 params) and far below the 9.28M-parameter
+  Torch genomes the old code path evolved -- none of which influenced play. The
+  shape funnels wide-to-narrow: a broad first layer captures interactions among
+  the 66 raw features, then narrows as it abstracts toward the action head.
 * **Side-symmetric.** Features are encoded from the acting player's point of
   view (the arena is mirrored for the opponent), so one genome can play either
   side. Self-play depends on this.
@@ -64,10 +66,10 @@ class PolicySpec:
 
         sum over each layer L_k with fan-in in_k, width w_k:  in_k * w_k + w_k
 
-    The default shape (66 -> 64 -> 48 -> 32 -> 7) gives 9,207 parameters.
+    The default shape (66 -> 96 -> 72 -> 56 -> 40 -> 7) gives 20,071 parameters.
     """
     feature_dim: int = FEATURE_DIM
-    hidden_dims: Tuple[int, ...] = (64, 48, 32)
+    hidden_dims: Tuple[int, ...] = (96, 72, 56, 40)
     num_outputs: int = NUM_OUTPUTS
 
     def __post_init__(self):
@@ -136,8 +138,10 @@ DEFAULT_POLICY_SPEC = PolicySpec()
 def make_spec(hidden_dims: Optional[Sequence[int]] = None) -> PolicySpec:
     """Build a spec from an explicit hidden-layer list.
 
-    ``None`` returns the default (64, 48, 32); pass e.g. ``(128,)`` for a wide
-    single layer or ``(96, 96, 64)`` to go deeper/wider in experiments.
+    ``None`` returns the default (96, 72, 56, 40); pass e.g. ``(128,)`` for a
+    wide single layer or ``(128, 96, 72)`` to go wider in experiments. The list
+    is read left-to-right: the first width sits next to the feature vector and
+    the last feeds the action head.
     """
     if hidden_dims is None:
         return DEFAULT_POLICY_SPEC
