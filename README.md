@@ -337,8 +337,15 @@ crp experiments list
 # Run architecture search
 crp search --generations 20 --population 20
 
-# Benchmark the real policy inference path (BATCH,FEATURES; FEATURES is 64)
-crp benchmark --model runs/run_123/best/best_agent.pt --input-shape 1024,64
+# Benchmark the real policy inference path (BATCH,FEATURES; FEATURES is 66)
+crp benchmark --model runs/run_123/best/best_agent.pt --input-shape 1024,66
+
+# Watch a live match in a pygame arena window (profiles: random/greedy/balanced/aggressive/defensive;
+# --model-a/--model-b load trained checkpoints instead of profiles)
+crp watch --profile-a balanced --profile-b aggressive
+
+# Headless watch for CI / no display (--frames N bounds the run and implies headless)
+SDL_VIDEODRIVER=dummy crp watch --headless --frames 40
 ```
 
 ### Using Python Scripts Directly
@@ -510,7 +517,7 @@ not the deep Torch networks. This is deliberate:
 
 | | Evolved policy | Torch architectures |
 |---|---|---|
-| **Parameters** | 2,311 | ~9.3M (CNN+LSTM) |
+| **Parameters** | 9,207 (default; configurable) | ~9.3M (CNN+LSTM) |
 | **Used for** | Every match in training | Architecture search, export, ensembling |
 | **Inference** | Pure NumPy, no allocation per tick | Torch forward pass |
 
@@ -518,14 +525,20 @@ Genomes are plain float vectors, so they ship to worker processes cheaply and
 evaluate thousands of times per match without rebuilding a model.
 
 ```
-observation (64 features)  ->  tanh(32 hidden)  ->  5 card logits + 2 placement
+observation (66 features)  ->  tanh(64) -> tanh(48) -> tanh(32)  ->  7 outputs
+                                                              (4 cards + pass + 2 placement coords)
 ```
 
-The 64 features cover elixir and crown state, per-slot hand affordability and
-card kind, all six tower healths, a pooled 3x4 troop-density grid per side, and
-per-lane troop/HP summaries. Features are encoded from the acting player's
-point of view — the arena is mirrored for the opponent — so a single genome can
-play either side, which self-play and tournaments rely on.
+The hidden stack is configurable: `PolicySpec.hidden_dims` controls depth and width,
+and training accepts it via `--hidden-layers W...` or `population.hidden_layers` in
+`configs/evolution.yaml`. The default above yields 9,207 parameters.
+
+The 66 features cover elixir and crown state (plus king-tower-active and
+double-elixir-overtime flags), per-slot hand readiness and card kind, all six tower
+healths, a pooled 3x4 troop-density grid per side, and per-lane troop/HP summaries.
+Features are encoded from the acting player's point of view — the arena is mirrored
+for the opponent — so a single genome can play either side, which self-play and
+tournaments rely on.
 
 `PolicySpec.num_params` is the contract between `Population` (which creates and
 mutates genomes) and the parallel runner (which executes them). Changing the

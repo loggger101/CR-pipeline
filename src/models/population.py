@@ -346,15 +346,31 @@ class Population:
         torch.save(checkpoint, path)
         logger.info(f"Saved population checkpoint (gen {self.generation}) to {path}")
 
-    def load_checkpoint(self, path: str) -> None:
+    def load_checkpoint(self, path: str, expected_genome_size: Optional[int] = None) -> None:
         """Load population state from a file.
 
         Args:
-            path: File path to load from.
+            path: File path to load.
+            expected_genome_size: If given, every loaded genome must have this
+                many parameters; otherwise the checkpoint was trained under a
+                different network shape and loading it would silently produce a
+                broken population (mismatched-size parents/children). Raises
+                ValueError on mismatch *before* any state is committed.
         """
         import torch
 
         checkpoint = load_checkpoint(path)
+
+        # Validate genome sizes before mutating anything: a size-mismatched
+        # checkpoint must fail cleanly, not leave the population half-loaded.
+        if expected_genome_size is not None:
+            for data in checkpoint["agents"]:
+                size = np.asarray(data["weights"]).size
+                if size != expected_genome_size:
+                    raise ValueError(
+                        f"checkpoint genome has {size} parameters, expected "
+                        f"{expected_genome_size}")
+
         self.generation = checkpoint["generation"]
         self.fitness_history = checkpoint["fitness_history"]
         self.diversity_history = checkpoint.get("diversity_history", [])

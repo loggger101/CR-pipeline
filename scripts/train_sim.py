@@ -99,6 +99,7 @@ def main():
     training_config = TrainingConfig(
         population_size=evolution_config.get("population", {}).get("size", 200),
         elite_count=evolution_config.get("population", {}).get("elite_count", 10),
+        hidden_layers=evolution_config.get("population", {}).get("hidden_layers"),
         elite_preservation=evolution_config.get("population", {}).get("elite_preservation", True),
         selection_strategy=evolution_config.get("selection", {}).get("strategy", "tournament"),
         tournament_size=evolution_config.get("selection", {}).get("tournament_size", 5),
