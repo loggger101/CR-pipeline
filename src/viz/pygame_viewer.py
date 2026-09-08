@@ -25,8 +25,9 @@ Usage from the CLI::
 
     python scripts/crp.py watch                          # random vs random
     python scripts/crp.py watch --model-a runs/<run>/best/best_agent.pt \
-                                --opponent-b balanced     # evolved vs heuristic
+                                --profile-b balanced      # evolved vs heuristic
     python scripts/crp.py watch --headless --frames 300   # no window, bounded
+    python scripts/crp.py watch --seed 42                 # R replays exactly this game
 
 Keys: space = pause/resume, R = restart match (same seed), +/- = speed, Q/ESC = quit.
 """
@@ -134,7 +135,7 @@ class ArenaWindow:
 
     def __init__(self, engine_factory=None, player_source=("profile", "random"),
                  opponent_source=("profile", "random"), speed: float = 10.0,
-                 headless: bool = False):
+                 headless: bool = False, match_seed: Optional[int] = None):
         if headless or os.environ.get("CRP_HEADLESS") == "1":
             os.environ.setdefault("SDL_VIDEODRIVER", "dummy")
         self.pg = _require_pygame()
@@ -173,6 +174,11 @@ class ArenaWindow:
         self.opponent_source = opponent_source
         self.speed = float(speed)
 
+        # Fixed seed for this window's match (R replays it). When None, the
+        # first engine construction decides: seeded factories are remembered;
+        # unseeded ones stay fresh on restart.
+        self._match_seed = int(match_seed) if match_seed is not None else None
+
         self.paused = False
         self.engine = None
         self.new_match()
@@ -182,13 +188,18 @@ class ArenaWindow:
     @classmethod
     def from_models(cls, model_a: Optional[str], model_b: Optional[str] = None,
                     profile_a: str = "random", profile_b: str = "balanced",
-                    speed: float = 10.0, headless: bool = False) -> "ArenaWindow":
+                    speed: float = 10.0, headless: bool = False,
+                    match_seed: Optional[int] = None) -> "ArenaWindow":
         """Build a window from checkpoint files and/or opponent profiles.
 
         ``model_a``/``model_b`` are paths to agent checkpoints (or ``None``, in
         which case the named profile is used instead). Genomes load through the
         same validated path training uses, so a corrupted or wrong-shape file
         fails here with a clear error rather than producing silent random play.
+
+        ``match_seed`` pins this window's match: R replays the exact same game
+        (same deck shuffles and opponent draws), which is what makes it useful
+        for debugging one specific matchup. Omit it for fresh games each time.
         """
         from ..serialization import load_agent_genome
         from ..models.policy import compile_genome
@@ -201,13 +212,27 @@ class ArenaWindow:
 
         return cls(player_source=source(model_a, profile_a),
                    opponent_source=source(model_b, profile_b),
-                   speed=speed, headless=headless)
+                   speed=speed, headless=headless, match_seed=match_seed)
 
     # ── Match lifecycle ─────────────────────────────────────────────────────
 
     def new_match(self):
-        """Start (or restart) a match with a fresh engine."""
+        """Start (or restart) a match with a fresh engine.
+
+        Restarts re-seed the original seed, so ``R`` replays *the same* game --
+        useful for debugging one specific match instead of getting a new random
+        one every time. A different match comes from quitting and relaunching.
+        """
         self.engine = self._engine_factory()
+        # Fresh per match, so an ended game never flashes over its replacement.
+        self._last_result_info: Optional[dict] = None
+        if self._match_seed is not None:
+            # reset(seed=...) re-derives the engine's RNG (and deck shuffles)
+            # from that seed, so every restart reproduces this window's match.
+            self.engine.reset(seed=self._match_seed)
+        elif getattr(self.engine, "_initial_seed", None) is not None:
+            # First construction with a seeded factory: remember it for R.
+            self._match_seed = int(self.engine._initial_seed)
         self.paused = False
 
     def _side_action(self, source: Tuple[str], side: str):
@@ -226,7 +251,15 @@ class ArenaWindow:
             return False
         player_act = self._side_action(self.player_source, "player")
         opponent_act = self._side_action(self.opponent_source, "opponent")
-        self.engine.step(player_act, opponent_act)
+        result = self.engine.step(player_act, opponent_act)
+        # Remember the termination info (winner/reason) so the overlay can show
+        # *who* won instead of just that it ended. The engine returns this on
+        # the step-result; nothing else stores it after the fact.
+        try:
+            if result is not None and getattr(result, "info", None):
+                self._last_result_info = dict(result.info)
+        except Exception:
+            pass
         return not (self.engine.terminated or self.engine.truncated)
 
     # ── Rendering (pure reads of engine state; safe headless) ───────────────
@@ -240,8 +273,9 @@ class ArenaWindow:
         """Draw the current engine state; returns a copy of the frame surface.
 
         Returning the surface (rather than only blitting it) is what lets tests
-        assert on pixels without polling the display, and lets ``--save-frame``
-        write screenshots from headless runs.
+        assert on pixels without polling the display, and makes headless runs
+        verifiable: ``crp watch --headless --frames N`` exercises this path end
+        to end in CI with no monitor attached.
         """
         pg = self.pg
         eng = self.engine
@@ -298,24 +332,42 @@ class ArenaWindow:
         self._draw_hud(eng.opponent_elixir, eng.player_elixir, eng.elixir_max,
                        eng.opponent_hand, eng.opponent_cooldowns, side="top")
 
-        # Status line: clock, crowns, overtime.
+        # Status line: clock, crowns, overtime (+double elixir while it lasts).
         total = eng.match_duration_ticks + (eng.overtime_ticks if eng.is_overtime else 0)
         secs_left = max(0, (total - eng.tick)) / float(eng.TICKS_PER_SECOND)
-        ot = "  OVERTIME" if eng.is_overtime else ""
+        ot = ""
+        if eng.is_overtime:
+            ot = "  OVERTIME"
+            if getattr(eng, "double_elixir_overtime", True):
+                ot += " (2x elixir)"
         status = f"{int(secs_left // 60)}:{secs_left % 60:04.1f}   crowns {eng.player_trophies}-{eng.opponent_trophies}{ot}"
         if self.font_big is not None and hasattr(self.font_big, "render"):
             surf = self.font_small.render(status, True, C_TEXT)
             screen.blit(surf, (ARENA_X + 2, WIN_H - HUD_BOTTOM + 18))
         if eng.terminated or eng.truncated:
-            winner = ""
-            try:
-                info = getattr(eng, "_last_result_info", None)
-                winner = f"   winner: {info.get('winner')}" if isinstance(info, dict) else ""
-            except Exception:
-                pass
-            msg = "match over" + (f" -- crowns {eng.player_trophies}-{eng.opponent_trophies}"
-                                  if eng.player_trophies != eng.opponent_trophies
-                                  and not getattr(eng, "_overtime_decided", None) else "") + winner
+            # Winner comes from the step-result info captured in step() -- the
+            # engine does not store it anywhere else after termination.
+            reason_map = {
+                "king_tower_destroyed": "by king tower destruction",
+                "overtime_sudden_death": "in overtime (sudden death)",
+                "time_up": None,  # decided by crowns; shown via the score line
+            }
+            info = self._last_result_info if isinstance(self._last_result_info, dict) else {}
+            winner_name = {"player": "Blue", "opponent": "Red"}.get(info.get("winner"), "")
+            reason = reason_map.get(info.get("reason"))
+            parts = []
+            if info.get("reason") == "time_up":
+                parts.append(f"time up -- crowns {info.get('player_crowns', eng.player_trophies)}-"
+                             f"{info.get('opponent_crowns', eng.opponent_trophies)}")
+            elif reason:
+                parts.append(reason)
+            if winner_name and info.get("winner") != "tie":
+                msg = f"match over -- {winner_name} wins" + (f", {' '.join(parts)}" if parts else "")
+            elif winner_name == "tie":
+                msg = "match over -- draw" + (f", {' '.join(parts)}" if parts else "")
+            else:  # no info captured (e.g. truncated without a result): fall back to crowns
+                msg = ("match over -- crowns "
+                       f"{eng.player_trophies}-{eng.opponent_trophies}")
             surf = self.font_big.render(msg, True, C_KING_RING)
             screen.blit(surf, (WIN_W // 2 - surf.get_width() // 2, WIN_H // 2))
 
@@ -413,8 +465,9 @@ class ArenaWindow:
 def run_arena(model_a: Optional[str] = None, model_b: Optional[str] = None,
               profile_a: str = "random", profile_b: str = "balanced",
               speed: float = 10.0, headless: bool = False,
-              frames: Optional[int] = None) -> int:
+              frames: Optional[int] = None, match_seed: Optional[int] = None) -> int:
     """Entry point used by ``crp watch`` and the tests."""
     win = ArenaWindow.from_models(model_a, model_b, profile_a, profile_b,
-                                  speed=speed, headless=headless or (frames is not None))
+                                  speed=speed, headless=headless or (frames is not None),
+                                  match_seed=match_seed)
     return win.run(frames=frames)

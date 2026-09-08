@@ -2,13 +2,21 @@
 
 ## Headline
 
-Version **0.3.0**. The pipeline trains Clash Royale AI agents via evolutionary
+Version **0.4.0**. The pipeline trains Clash Royale AI agents via evolutionary
 strategies with tournament matchmaking. The core loop is stable, the sim is
 internally consistent, and the desktop app drives everything without a terminal.
+The evolved policy is now a four-layer tanh MLP (20,071 parameters by default)
+and every generation explicitly builds on the last via champion refinement,
+tempered selection, adaptive mutation and a diversity-collapse guard.
 
-Suite: **513 tests passing** across simulation engine, evolution strategies,
-tournament system, checkpoint/resume, run artifacts, desktop UI, visualization,
-monitoring, and integration.
+Suite: **551 tests passing** across simulation engine, evolution strategies,
+tournament system, checkpoint/resume, run artifacts, desktop UI, pygame arena
+viewer, monitoring, and integration.
+
+> Checkpoint compatibility note: genomes written by earlier builds of this
+> project (2,311-parameter and 9,207-parameter nets) do not load in current
+> code — the policy feature set and layer widths have changed. `crp watch` and
+> resume reject mismatched files with a clear message instead of failing later.
 
 ---
 
@@ -18,16 +26,17 @@ monitoring, and integration.
 |-------|-----------|---------|
 | **Simulation** | `src/env/sim/engine.py` | Tick-based (10 Hz) Clash Royale sim: 8×6 arena, king activation, crown scoring, overtime, card cycling, status effects, death spawns. |
 | **Parallel runner** | `src/env/sim/parallel_runner.py` | Multiprocessing worker pool (`os.cpu_count() - 1`). Each worker runs matches with either scripted opponents or the evolved policy (pure NumPy). Common random numbers across agents per generation. |
-| **Evolvable policy** | `src/models/policy.py` | 2,311-parameter NumPy MLP: 64 features → tanh(32) → 5 card logits + 2 placement coordinates. Side-symmetric (arena mirrored for opponent). Genome is the flat parameter vector; `compile_genome()` caches unpacked layers per match. |
+| **Evolvable policy** | `src/models/policy.py` | Multi-layer tanh MLP, default 66 features → (96, 72, 56, 40) hidden layers → 5 card logits + 2 placement coordinates = 20,071 parameters. Side-symmetric (arena mirrored for opponent). Genome is the flat parameter vector; `compile_genome()` caches unpacked layers per match. Shape configurable via `hidden_layers` / CLI `--hidden-layers`. |
 | **Agent** | `src/models/agent.py` | Wraps a genome or a Torch network, handles action selection with exploration strategies (ε-greedy, Boltzmann, entropy-regularized), saves/loads checkpoints (`genome` + `param_kind`). Network is built lazily — never constructed for population init. |
 | **Population** | `src/models/population.py` | Manages agent records, fitness ranking, diversity tracking, speciation. Weight accessors all route through the policy genome, not the Torch network. |
-| **GA operators** | `src/models/evolution.py` | Selection (tournament, rank, roulette, tournament-elite), crossover (blend, single-point, uniform, arithmetic), mutation (Gaussian, uniform, adaptive). All selectors use bounded parent re-draw (`_MAX_DISTINCT_ATTEMPTS = 32`) to prevent hangs on small populations. |
+| **GA operators** | `src/models/evolution.py` | Selection (tournament, rank, roulette, tournament-elite), crossover (blend, single-point, uniform, arithmetic), mutation (Gaussian, uniform, adaptive). Advanced dynamics in the default tournament strategy: z-scored tempered softmax parent selection, champion refinement channel (gentle mutations of the run's best genome each generation), adaptive mutation σ with stagnation detection, diversity-collapse immigration guard, and a genome-size-scaled mutation-load cap (`max_expected_mutations`). All selectors use bounded parent re-draw (`_MAX_DISTINCT_ATTEMPTS = 32`) to prevent hangs on small populations. |
 | **Tournament** | `src/train/evaluator.py` | Swiss pairing (default), round-robin, single/double elimination, league. ELO tracking with K=32. Hall of fame carries past champions across generations as non-reproducing benchmarks. |
 | **Trainer** | `src/train/trainer.py` | Orchestrates the evolution loop: population init → evaluate → evolve → checkpoint → repeat. Handles resume from run dir / gen folder / population file. Seeds chosen agents intact, fills remaining slots with mutated copies. Writes run-level metrics every generation (not just inside checkpoints). |
 | **Architecture search** | `src/models/architecture_search.py` | Evolves network topologies across layer types, filter sizes, attention heads, etc. Keeps the evolved policy as the primary representation; architectures are for NAS/export/ensembling. |
 | **Ensemble** | `src/models/ensemble.py` | Weight averaging (performance-weighted), geometric mean, stacking with meta-learner. Optimizes combination weights from tournament fitness. |
 | **Desktop UI** | `src/ui/app.py` + `_tabs*` | Tkinter window with four tabs: Train (configure/start/stop training, live chart), Watch (replay on arena canvas with scrubbing/speed), Runs (browse past runs, compare fitness curves), Agents (play saved agent vs baselines or head-to-head). Work runs on a thread; UI drains events via `after(poll)`. |
-| **CLI** | `scripts/crp.py` | 11 subcommands: `train`, `tournament`, `hpo`, `export`, `report`, `dashboard`, `compare`, `experiments`, `pipelines`, `search`, `benchmark`. |
+| **CLI** | `scripts/crp.py` | 14 subcommands: `train`, `tournament`, `hpo`, `export`, `report`, `compare`, `dashboard`, `experiments`, `pipelines`, `search`, `benchmark`, `models`, `config`, `watch`. |
+| **Arena viewer** | `src/viz/pygame_viewer.py` | Pygame window that plays a match live (or headless): towers, units with HP bars, elixir/hand HUD, clock/crowns/overtime status. Either side is an evolved genome from a checkpoint or a heuristic profile; `--seed N` pins the match so R replays exactly it. Update/render split makes it fully testable without a display. |
 | **Visualization** | `src/viz/dashboard.py` | Streamlit dashboard (8 tabs): Fitness, Statistics, Tournament, Comparison, Runs, Config, Monitoring, Card Meta. Plotly charts with smoothing and statistical significance testing. |
 | **Monitoring** | `src/train/monitoring/` | Metrics collection, GPU/CPU resource monitoring, bottleneck detection. Optional during training. |
 | **Alerting** | `src/alerting/__init__.py` | Convergence, bottleneck, fitness milestone, early-stop, GPU error alerts with template formatting and multiple channels (console/file). |
@@ -156,6 +165,22 @@ Both real runs looked flat: mean fitness moved from 0.664 to 0.700 across 61 gen
 
 The real signal was already in the data: hall-of-fame champions' ratings decline relative to the field as the population outgrows them (`hof_gen0` 1483 → 1441, `hof_gen1` 1464 → 1422). Progress snapshots now carry `population_elo` and `hall_of_fame_elo`; Train tab charts ratings rather than the flat fitness curve.
 
+### Round 9 — Deeper policy net + advanced GA dynamics (v0.4)
+
+| Change | Before | After |
+|--------|--------|-------|
+| Evolved policy shape | Single hidden layer, 64 features → tanh(32) → 7 outputs = 2,311 params; later a three-layer 9,207-param net | Four-layer funnel **66 → (96, 72, 56, 40) → 7 = 20,071 params** by default. Wide at the input where raw features enter, narrowing as it abstracts; probe-verified for behavioral diversity and healthy activations before shipping. Configurable via `hidden_layers` / CLI `--hidden-layers`. |
+| Feature set | 64 features incl. a raw elixir-rate factor (violated the \|features\| ≤ 1 contract) | 66 features: rate factor removed; own-king-active and double-elixir-overtime flags added. |
+| Parent selection | Raw-score softmax with near-zero effective temperature → de-facto argmax → population collapsed to clones of one lucky agent within a few generations | Z-scored tempered softmax (temperature 1.0): strong but finite share for the top, mid-field agents still breed. |
+| Exploitation channel | None — best genomes left to chance recombination | **Champion refinement**: K offspring per generation are gentle mutations of the run's best genome so far (`champion_refinements`, default 2). This is what makes each generation explicitly build on the last. |
+| Mutation rate handling | Per-weight probability, config values ignored in tournament mode (hardcoded defaults) | Config-driven rates + **genome-size mutation-load cap** (`max_expected_mutations`, default 1400): expected mutations per offspring = rate × genome_size grew ~1,381 → ~3,011 when params doubled at the test's rate of 0.15 and *measurably degraded* selection (trend +0.06…+0.11/gen → −0.10…+0.04 across seeds); capping to old-net parity restored improvement (+0.09/+0.05/+0.10). No-op for small/low-rate configs, so real runs (rate 0.05) are bit-identical. |
+| Stagnation response | None — flat generations kept the same σ forever | Adaptive mutation: live σ widens after `ga_stagnation_window` flat generations (bounded), decays ×0.8 when progress resumes; on by default, `--no-adaptive-mutation` to disable. |
+| Diversity collapse | Undetected — blend crossover + light mutation converge to near-clones silently | First generation records a scale-free diversity baseline; below ~25% of it, fresh random genomes replace the weakest slots (immigration guard). |
+| `test_selection_raises_mean_fitness` | Single population's mean(last-3) > mean(first-3): flips sign across seeds on the new net and passed ~50% of the time under pure random drift — testing luck, not signal | Paired design: an evolved arm vs a control whose children are mutations of *random* parents (what evolution degenerates to if it stops using fitness), scored on identical match seeds. At 6 matches/gen with a 5-generation window every init seed separated (+1.3…+3.5 vs pooled SE ~0.7) while no-signal nulls stayed within noise (\|gap\| ≤ 0.74). Provenance numbers live in the test's docstring. |
+| Checkpoint shape validation | Silent corruption risk: an old-shape checkpoint loaded into a new run produced garbage play | `Population.load_checkpoint(expected_genome_size)` validates before loading; trainer resume triggers clean re-init on mismatch instead of silently corrupting. |
+
+**Measured effect:** full suite 513 → **551 tests passing**; live smoke runs show champion refinement active every generation and best fitness rising across generations.
+
 ---
 
 ## Known limitations & future work
@@ -163,20 +188,22 @@ The real signal was already in the data: hall-of-fame champions' ratings decline
 | Area | Status | Notes |
 |------|--------|-------|
 | Frozen build size | ⚠️ Heavy (~4 GB with CUDA) | CPU-only torch wheel cuts it dramatically; app only needs torch for checkpoint I/O (genome is NumPy). `CRP_CONSOLE=1` for debug builds. OneDrive/Dropbox sync folders cause `PermissionError` during build — use `--output PATH`. |
-| Watch tab | Partial | Replays one match at a time. Watching two saved agents play each other would reuse `play_match` with `opponent_genome` (already wired, not exposed in UI). |
-| Fitness transfer | Real but modest | 10 gens × 16 agents = smoke test. Longer runs at larger population are the next step now that the loop scales. |
+| Watch tab | Partial | Replays one match at a time. Watching two saved agents play each other would reuse `play_match` with `opponent_genome` (already wired, not exposed in UI). The separate pygame arena window (`crp watch`) already supports genome-vs-genome via `--model-a/--model-b`. |
+| Fitness transfer | Real but modest | 10 gens × 16 agents = smoke test. Longer runs at larger population are the next step now that the loop scales and generations explicitly build on champions (Round 9). |
 | Hall of fame diversity | Could improve | Keeps only most recent champions. A diverse archive (sampling across whole run rather than sliding window) resists cycling better — worth trying if agents beat recent champions while losing to older ones. |
 | `configs/sim_game.yaml` | Documentation only | Engine hardcodes its layout and rules; nothing reads the tower section. Either wire it up or drop it. |
 | Status effects | Single-slot | Applying a stun replaces an active poison. Real stacking would need a list of active effects per unit. |
 | `OpponentProfile.min_play_gap` | Nearly inert | At real elixir rate, affording a card takes ~84 ticks; a 3–6 tick gap rarely binds. Only matters when opponent has large bank + cheap cards. |
+| Checkpoint versioning | ⚠️ No format tag in files | Genome shape is validated against the current default at load time (clear error on mismatch), but checkpoints carry no explicit schema/version field — a future feature-set change will again make old runs unwatchable rather than merely incompatible. Adding `policy_version` to checkpoint metadata would let loaders migrate or reject deliberately. |
 | All 20+ phases in roadmap | ✅ Complete through Phase 18 | Phases 19-24 (live-game prototype, full sim, live fine-tuning, distributed Ray training, API docs, Jupyter tutorials) remain open. |
 
 ---
 
 ## Where to pick up
 
-1. **Longer tournament runs at larger populations** — the loop is stable; scaling is the next experiment.
-2. **Hall of fame diversity** — sampling across the whole run rather than a sliding window may improve resistance to cycling.
-3. **Watch tab head-to-head** — expose `play_match(opponent_genome)` in the UI so two saved agents can play each other.
-4. **Live-game interaction** (Phase 19) — `src/env/live/` has screen capture, game state extraction, and action mapper stubs but is not wired into training yet.
-5. **Full card registry** (Phase 20) — currently ~140 cards; real Clash Royale has 110+ unique cards at various levels. The registry structure supports expansion.
+1. **Longer tournament runs at larger populations** — the loop is stable and each generation now refines the champion; scaling is the next experiment (a multi-hour `crp train --max-gens 100+` run with ELO curves would be the first real proof of learning quality).
+2. **Checkpoint schema versioning** — add a `policy_version` field so old runs are rejected/migrated deliberately instead of by shape coincidence.
+3. **Hall of fame diversity** — sampling across the whole run rather than a sliding window may improve resistance to cycling.
+4. **Watch tab head-to-head** — expose `play_match(opponent_genome)` in the UI so two saved agents can play each other (the pygame viewer already does this via CLI).
+5. **Live-game interaction** (Phase 19) — `src/env/live/` has screen capture, game state extraction, and action mapper stubs but is not wired into training yet.
+6. **Full card registry** (Phase 20) — currently ~140 cards; real Clash Royale has 110+ unique cards at various levels. The registry structure supports expansion.

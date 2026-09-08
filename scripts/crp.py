@@ -856,6 +856,9 @@ Examples:
                               help="No window: run on the dummy SDL driver")
     watch_parser.add_argument("--frames", type=int, default=None,
                               help="Stop after N rendered frames (implies headless)")
+    watch_parser.add_argument("--seed", type=int, default=None, metavar="N",
+                              help="Pin the match to seed N: R replays exactly this game "
+                                   "(same deck shuffles and opponent draws) instead of a fresh one")
 
     args = parser.parse_args()
 
@@ -916,9 +919,15 @@ def cmd_watch(args: argparse.Namespace) -> int:
             speed=args.speed,
             headless=headless,
             frames=args.frames,
+            match_seed=args.seed,
         )
     except ImportError as exc:
         logger.error(f"pygame unavailable: {exc}")
+        return 1
+    except ValueError as exc:
+        # Wrong-shape / Torch-network checkpoint -- say so clearly instead of a
+        # traceback (this is the common case for pre-widening runs/ folders).
+        logger.error(str(exc))
         return 1
 
 
