@@ -12,6 +12,7 @@ pandas>=2.0.0
 # Simulation & environment
 mss>=9.0.0
 pyautogui>=0.9.54
+pygame>=2.5.0          # arena window for `crp watch` (optional at runtime, required to use it)
 opencv-python>=4.8.0
 
 # Model export

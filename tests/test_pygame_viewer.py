@@ -161,3 +161,50 @@ class TestRunArenaHeadless:
         rc = run_arena(profile_a="random", profile_b="random", frames=30)
         assert rc == 0
         pygame.quit()
+
+
+class TestViewerMatchReplay:
+    """R must replay the SAME game when a seed is pinned (not a fresh one)."""
+
+    def _make(self, seed):
+        from src.viz.pygame_viewer import ArenaWindow
+        return ArenaWindow(player_source=("profile", "random"),
+                           opponent_source=("profile", "balanced"),
+                           headless=True, match_seed=seed)
+
+    def test_seeded_restart_replays_identical_match(self):
+        _headless()
+        win = self._make(1234)
+        try:
+            def play_to_end():
+                while not (win.engine.terminated or win.engine.truncated):
+                    if not win.step():
+                        break
+
+            play_to_end()
+            first = (win._last_result_info.get("winner"),
+                     win.engine.player_trophies, win.engine.opponent_trophies)
+            assert win.engine.terminated  # a full match actually finished
+
+            win.new_match()               # R: restart
+            assert win.engine.tick == 0
+            play_to_end()
+            second = (win._last_result_info.get("winner"),
+                      win.engine.player_trophies, win.engine.opponent_trophies)
+            assert first == second        # identical replay of the same game
+        finally:
+            pygame.quit()
+
+    def test_step_captures_winner_from_engine(self):
+        """The overlay's winner text is driven by real engine data."""
+        _headless()
+        win = self._make(99)
+        try:
+            while not (win.engine.terminated or win.engine.truncated):
+                if not win.step():
+                    break
+            info = win._last_result_info
+            assert isinstance(info, dict), "termination info must be captured"
+            assert info.get("winner") in ("player", "opponent", "tie")
+        finally:
+            pygame.quit()

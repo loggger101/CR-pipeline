@@ -101,7 +101,8 @@ CR-Pipeline/
 │   │   ├── reports.py              # HTML, Markdown, JSON report generation
 │   │   ├── replay.py               # Replay viewer
 │   │   ├── live_game_view.py       # Live gameplay overlay
-│   │   └── rendering.py            # Simulation arena renderer
+│   │   ├── pygame_viewer.py        # Pygame arena window (`crp watch`)
+│   │   └── rendering.py            # Simulation arena renderer (Tk canvas)
 │   ├── ui/                       # Desktop application (Tkinter)
 │   │   ├── app.py                  # Window and the four tabs
 │   │   ├── operations.py           # Pipeline actions the UI drives
@@ -344,9 +345,14 @@ crp benchmark --model runs/run_123/best/best_agent.pt --input-shape 1024,66
 # --model-a/--model-b load trained checkpoints instead of profiles)
 crp watch --profile-a balanced --profile-b aggressive
 
+# Pin the match to a seed so R replays exactly that game (deck shuffles included)
+crp watch --seed 42
+
 # Headless watch for CI / no display (--frames N bounds the run and implies headless)
 SDL_VIDEODRIVER=dummy crp watch --headless --frames 40
 ```
+
+**Note on checkpoints:** `crp watch` loads genomes through the same validated path as training, so a checkpoint must match the current default policy shape (20,071 parameters). Files from earlier versions of this project (2,311- or 9,207-parameter nets) — including anything under an old `runs/` folder — are rejected with a clear message explaining the mismatch instead of playing silently random. Re-train to watch them against current opponents.
 
 ### Using Python Scripts Directly
 

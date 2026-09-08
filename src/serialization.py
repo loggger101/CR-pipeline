@@ -63,6 +63,22 @@ def load_agent_genome(path: str) -> np.ndarray:
 
     expected = DEFAULT_POLICY_SPEC.num_params
     if genome.size != expected:
+        # Distinguish a legitimate *older-shape* evolved checkpoint from an
+        # unplayable Torch-network file. The two used to be conflated ("this
+        # looks like a Torch network"), which was wrong for the 2,311-param and
+        # 9,207-param genomes written by earlier versions of this project: they
+        # are real evolved agents, just from before the current feature set /
+        # layer widths. A genuine Torch-network payload is far larger (the CNN+LSTM
+        # architectures run to millions of parameters) and/or carries no genome key.
+        if genome.size < expected // 2:
+            raise ValueError(
+                f"{path} holds a {genome.size}-parameter evolved policy that does "
+                f"not match the current default ({expected} parameters) -- it is "
+                f"either from an earlier version (feature set / layer widths have "
+                f"changed since 2,311-param and 9,207-param nets) or was trained "
+                f"with a custom --hidden-layers shape. Re-train with the default "
+                f"net, or use this file with a matching checkout."
+            )
         raise ValueError(
             f"{path} holds {genome.size} parameters but the simulator plays "
             f"{expected}-parameter policies; this looks like a Torch network "
