@@ -179,6 +179,11 @@ class TrainingConfig:
     hall_of_fame_size: int = 4
     # Simulation config (overrides engine defaults via sim_game.yaml)
     sim_config_path: Optional[str] = None   # Path to sim_game.yaml; None → engine defaults
+    # Evolved policy network shape. hidden_layers is the list of tanh hidden
+    # layer widths between features and outputs, e.g. [64, 48, 32]. None uses
+    # the default from models/policy.py (PolicySpec). The feature dimension is
+    # fixed by encode_features; only depth/width are tunable here.
+    hidden_layers: Optional[List[int]] = None
     monitor_resources: bool = False
     monitor_sample_interval: float = 1.0
     monitor_output_dir: str = "runs/monitoring"
@@ -253,6 +258,8 @@ class TrainingConfig:
             "tournament_elite_fraction": self.tournament_elite_fraction,
             # Simulation config override
             "sim_config_path": self.sim_config_path,
+            # Policy network shape (None = default spec)
+            "hidden_layers": list(self.hidden_layers) if self.hidden_layers else None,
             # Experiment tracking
             "enable_experiment_tracking": self.enable_experiment_tracking,
             "experiment_name": self.experiment_name,
@@ -291,9 +298,21 @@ class EvolutionTrainer:
             config: Training configuration.
         """
         self.config = config
+        # Policy network shape: None (the default) uses models/policy.py's spec;
+        # an explicit hidden_layers list builds a wider/deeper net for this run.
+        from ..models.policy import DEFAULT_POLICY_SPEC, make_spec
+        if config.hidden_layers:
+            self.policy_spec = make_spec(config.hidden_layers)
+            logger.info(
+                f"Custom policy network: {self.policy_spec.feature_dim} -> "
+                f"{list(self.policy_spec.hidden_dims)} -> {self.policy_spec.num_outputs} "
+                f"({self.policy_spec.num_params} params)")
+        else:
+            self.policy_spec = DEFAULT_POLICY_SPEC
         self.population = Population(
             population_size=config.population_size,
             elite_count=config.elite_count,
+            policy_spec=self.policy_spec,
         )
         self.evolution = EvolutionStrategy(
             EvolutionConfig(
@@ -774,7 +793,12 @@ class EvolutionTrainer:
         thing being optimised: winning games against real opponents.
         """
         population_size = len(weights)
-        entrant_weights = list(weights) + [g for g, _ in self.hall_of_fame]
+        # Compile with THIS run's spec so a custom network keeps its shape past
+        # the process boundary -- downstream _ensure_compiled passes tuples
+        # through untouched, but would unpack flat arrays against the default.
+        from ..models.policy import compile_genome
+        entrant_weights = [compile_genome(w, self.policy_spec) for w in weights] \
+            + [compile_genome(g, self.policy_spec) for g, _ in self.hall_of_fame]
         # Hall-of-fame entrants keep the id they were admitted under, so their
         # carried-over rating follows the genome. Numbering them by slot would
         # hand a departing champion's rating to whoever rotated into its place.
@@ -1043,7 +1067,11 @@ class EvolutionTrainer:
         generation_seed = self.config.seed + generation * 1000
 
         for i in range(0, len(weights), batch_size):
-            batch = weights[i:i + batch_size]
+            # Compile with this run's spec before crossing into the runner: a
+            # custom-shaped genome unpacked against the default would crash or
+            # misread its own weights inside the worker.
+            from ..models.policy import compile_genome
+            batch = [compile_genome(w, self.policy_spec) for w in weights[i:i + batch_size]]
             # Extract simulation overrides from loaded config when present
             sim_kwargs: Dict[str, Any] = {}
             if self._sim_config is not None:
@@ -1347,7 +1375,25 @@ class EvolutionTrainer:
                 f"population.pt file."
             )
 
-        self.population.load_checkpoint(str(checkpoint_path))
+        # Validate before committing: this run's network shape must match what
+        # the checkpoint was trained under, or evolution would mix mismatched-
+        # size parents and children. A mismatch is not a crash -- it means "this
+        # checkpoint belongs to a different architecture", so start fresh with a
+        # loud warning instead of silently loading a broken population (the
+        # classic "resumed into a different network" defect).
+        try:
+            self.population.load_checkpoint(
+                str(checkpoint_path), expected_genome_size=self.policy_spec.num_params)
+        except ValueError as exc:
+            logger.warning(
+                "Checkpoint %s does not match this run's policy network (%d "
+                "params, hidden_layers=%s): %s. Starting a FRESH population "
+                "instead of resuming -- to continue that checkpoint, resume with "
+                "the same --hidden-layers it was trained under.",
+                checkpoint_path.name, self.policy_spec.num_params,
+                list(self.policy_spec.hidden_dims), exc)
+            return
+
         self.generation = self.population.generation
 
         # The checkpoint decides the population size -- you cannot resume a

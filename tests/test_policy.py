@@ -28,20 +28,34 @@ class TestPolicySpec:
     """Shape and packing contract."""
 
     def test_num_params_matches_layer_sizes(self):
-        spec = PolicySpec(feature_dim=8, hidden_dim=4, num_outputs=3)
+        spec = PolicySpec(feature_dim=8, hidden_dims=(4,), num_outputs=3)
         assert spec.num_params == 8 * 4 + 4 + 4 * 3 + 3
+
+    def test_num_params_sums_all_layers_for_deep_net(self):
+        """Each layer contributes fan_in*width + width; the head counts too."""
+        spec = PolicySpec(feature_dim=10, hidden_dims=(7, 5), num_outputs=2)
+        assert spec.num_params == (10 * 7 + 7) + (7 * 5 + 5) + (5 * 2 + 2)
+
+    def test_default_spec_is_three_hidden_layers(self):
+        """The evolved policy must have more than one hidden layer."""
+        assert DEFAULT_POLICY_SPEC.hidden_dims == (64, 48, 32)
+        # 66 -> 64 -> 48 -> 32 -> 7.
+        expected = (66 * 64 + 64) + (64 * 48 + 48) + (48 * 32 + 32) + (32 * 7 + 7)
+        assert DEFAULT_POLICY_SPEC.num_params == expected
 
     def test_random_genome_has_exact_length(self):
         spec = DEFAULT_POLICY_SPEC
         assert _genome(0, spec).shape == (spec.num_params,)
 
     def test_unpack_returns_correctly_shaped_matrices(self):
-        spec = PolicySpec(feature_dim=8, hidden_dim=4, num_outputs=3)
-        w1, b1, w2, b2 = spec.unpack(np.arange(spec.num_params, dtype=float))
-        assert w1.shape == (8, 4)
-        assert b1.shape == (4,)
-        assert w2.shape == (4, 3)
-        assert b2.shape == (3,)
+        """A deep spec unpacks into one (W_k, b_k) pair per layer."""
+        spec = PolicySpec(feature_dim=8, hidden_dims=(4, 3), num_outputs=2)
+        layers = spec.unpack(np.arange(spec.num_params, dtype=float))
+        assert len(layers) == 6          # W1,b1,W2,b2,W3,b3
+        w1, b1, w2, b2, wo, bo = layers
+        assert w1.shape == (8, 4) and b1.shape == (4,)
+        assert w2.shape == (4, 3) and b2.shape == (3,)
+        assert wo.shape == (3, 2) and bo.shape == (2,)
 
     def test_unpack_rejects_wrong_sized_genome(self):
         """A size mismatch must fail loudly, not silently misinterpret memory."""
@@ -52,6 +66,17 @@ class TestPolicySpec:
     def test_random_genome_is_seed_reproducible(self):
         assert np.array_equal(_genome(3), _genome(3))
         assert not np.array_equal(_genome(3), _genome(4))
+
+    def test_empty_hidden_dims_rejected(self):
+        with pytest.raises(ValueError, match="non-empty"):
+            PolicySpec(feature_dim=8, hidden_dims=(), num_outputs=2)
+
+    def test_make_spec_builds_custom_depth_and_width(self):
+        from src.models.policy import make_spec
+        wide = make_spec((128,))
+        assert wide.hidden_dims == (128,)
+        deep = make_spec((96, 96, 64))
+        assert deep.num_params > wide.num_params > DEFAULT_POLICY_SPEC.num_params
 
 
 class TestPolicyForward:
@@ -158,6 +183,43 @@ class TestFeatureEncoding:
         eng._spawn_unit("knight", 3.0, 4.0, "player")
         occupied = encode_features(eng, "player")
         assert not np.array_equal(empty, occupied)
+
+    def test_king_active_flag_tracks_activation(self):
+        """The king-active global flips when the king wakes."""
+        eng = SimulationEngine(seed=4, record_replay=False)
+        eng.reset()
+        feats_off = encode_features(eng, "player")
+        assert feats_off[6] == 0.0          # king dormant at match start
+
+        king = next(t for t in eng.player_towers if t.is_king)
+        king.take_damage(king.max_hp * 0.5)  # past the 25% wake threshold
+        eng._activate_king("player")
+        feats_on = encode_features(eng, "player")
+        assert feats_on[6] == 1.0
+
+    def test_double_elixir_ot_flag_tracks_overtime(self):
+        """The double-elixir OT global is off in regulation and on in real OT."""
+        eng = SimulationEngine(seed=4, record_replay=False)
+        eng.reset()
+        assert encode_features(eng, "player")[7] == 0.0
+
+        eng.is_overtime = True
+        feats_ot = encode_features(eng, "player")
+        assert feats_ot[4] == 1.0           # plain overtime flag (index 4)
+        assert feats_ot[7] == 1.0           # double-elixir OT (enabled by default)
+
+        eng.double_elixir_overtime = False
+        assert encode_features(eng, "player")[7] == 0.0
+
+
+class TestFeatureEncodingDimension:
+    """The feature vector must match what the policy consumes."""
+
+    def test_feature_dim_matches_spec(self):
+        from src.models.policy import DEFAULT_POLICY_SPEC
+        eng = SimulationEngine(seed=4, record_replay=False)
+        eng.reset()
+        assert encode_features(eng).shape == (DEFAULT_POLICY_SPEC.feature_dim,)
 
 
 class TestCompiledGenome:

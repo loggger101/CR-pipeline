@@ -83,6 +83,7 @@ def cmd_train(args: argparse.Namespace) -> int:
         collect_matches=args.collect_matches,
         enable_experiment_tracking=args.experiments,
         sim_config_path=args.sim_config,
+        hidden_layers=args.hidden_layers,
     )
 
     trainer = EvolutionTrainer(config)
@@ -588,7 +589,7 @@ def cmd_benchmark(args: argparse.Namespace) -> int:
     validated so a meaningless tensor shape cannot be benchmarked.
     """
     from src.deploy import InferenceBenchmarker
-    from src.models.policy import FEATURE_DIM, compile_genome
+    from src.models.policy import FEATURE_DIM, compile_genome, policy_forward
 
     # Load model
     checkpoint = load_checkpoint(str(args.model))
@@ -607,13 +608,15 @@ def cmd_benchmark(args: argparse.Namespace) -> int:
     batch, feat = dims
 
     # Compile the genome once (as matches do) and run its exact forward pass.
-    w1, b1, w2, b2 = compile_genome(genome)
+    compiled = compile_genome(genome)
 
     def model_fn(x):
         x = np.asarray(x, dtype=np.float64).reshape(batch, feat)
-        hidden = np.tanh(x @ w1 + b1)
-        out = hidden @ w2 + b2
-        return np.concatenate([out[:, :5], np.tanh(out[:, 5:7])], axis=1)
+        outs = []
+        for row in x:
+            logits, placement = policy_forward(compiled, row)
+            outs.append(np.concatenate([logits, placement]))
+        return np.stack(outs, axis=0)
 
     benchmarker = InferenceBenchmarker()
     results = benchmarker.benchmark(
@@ -698,6 +701,10 @@ Examples:
     train_parser.add_argument("--collect-matches", action="store_true", help="Collect match data")
     train_parser.add_argument("--sim-config", default=None,
                               help="Path to sim_game.yaml (overrides engine defaults)")
+    train_parser.add_argument("--hidden-layers", type=int, nargs="+", default=None,
+                              metavar="WIDTH",
+                              help="Hidden layer widths of the evolved policy net "
+                                   "(default: 64 48 32). E.g. --hidden-layers 128 for a wide single layer.")
 
     # Tournament command
     tour_parser = subparsers.add_parser("tournament", help="Run tournament evaluation")
@@ -808,6 +815,33 @@ Examples:
     model_parser.add_argument("--registry-dir", default="runs/model_registry")
     model_parser.add_argument("--limit", type=int, default=10)
 
+    # Config generator command (must be registered before parse_args below --
+    # a subparser added afterwards is silently unreachable).
+    config_parser = subparsers.add_parser("config", help="Generate configurations")
+    config_parser.add_argument("type", choices=["evolution", "simulation", "tournament"], help="Config type")
+    config_parser.add_argument("--preset", "-p", default="standard", help="Preset name")
+    config_parser.add_argument("--name", "-n", type=str, default=None, help="Output filename")
+    config_parser.add_argument("--override", "-o", nargs="*", default=[], help="Key=value overrides")
+    config_parser.add_argument("--output-dir", default="configs/generated")
+
+    # Watch command: live pygame arena window for a simulated match.
+    watch_parser = subparsers.add_parser(
+        "watch", help="Watch a simulated match in the pygame arena window")
+    watch_parser.add_argument("--model-a", "-a", type=str, default=None,
+                              help="Agent checkpoint (best_agent.pt) controlling the bottom player; profile A if omitted")
+    watch_parser.add_argument("--model-b", "-b", type=str, default=None,
+                              help="Agent checkpoint for the top opponent; profile B if omitted")
+    watch_parser.add_argument("--profile-a", default="random",
+                              choices=["random", "greedy", "balanced", "aggressive", "defensive"])
+    watch_parser.add_argument("--profile-b", default="balanced",
+                              choices=["random", "greedy", "balanced", "aggressive", "defensive"])
+    watch_parser.add_argument("--speed", type=float, default=10.0,
+                              help="Ticks per second (engine native rate is 10)")
+    watch_parser.add_argument("--headless", action="store_true",
+                              help="No window: run on the dummy SDL driver")
+    watch_parser.add_argument("--frames", type=int, default=None,
+                              help="Stop after N rendered frames (implies headless)")
+
     args = parser.parse_args()
 
     if not args.command:
@@ -815,14 +849,6 @@ Examples:
         return 0
 
     setup_logging(args.verbose)
-
-    # Config generator command
-    config_parser = subparsers.add_parser("config", help="Generate configurations")
-    config_parser.add_argument("type", choices=["evolution", "simulation", "tournament"], help="Config type")
-    config_parser.add_argument("--preset", "-p", default="standard", help="Preset name")
-    config_parser.add_argument("--name", "-n", type=str, default=None, help="Output filename")
-    config_parser.add_argument("--override", "-o", nargs="*", default=[], help="Key=value overrides")
-    config_parser.add_argument("--output-dir", default="configs/generated")
 
     # Dispatch to command handler
     commands = {
@@ -839,6 +865,7 @@ Examples:
         "benchmark": cmd_benchmark,
         "models": cmd_models,
         "config": cmd_config,
+        "watch": cmd_watch,
     }
 
     handler = commands.get(args.command)
@@ -846,6 +873,37 @@ Examples:
         return handler(args)
     else:
         parser.print_help()
+        return 1
+
+
+def cmd_watch(args: argparse.Namespace) -> int:
+    """Open the pygame arena window and play a simulated match.
+
+    Each side is either an evolved genome loaded from a checkpoint (``-a`` /
+    ``-b``) or a named heuristic profile (``--profile-a`` / ``--profile-b``).
+    A missing model falls back to its profile, so the command always runs --
+    with no checkpoints it shows two heuristics fighting.
+
+    Headless mode (``--headless`` or any ``--frames N``) drives the same code on
+    the dummy SDL driver and exits after N frames; this is how CI exercises the
+    viewer without a display, and it doubles as a smoke test that a full match
+    renders to sane pixels.
+    """
+    from src.viz.pygame_viewer import run_arena
+
+    headless = args.headless or (args.frames is not None)
+    try:
+        return run_arena(
+            model_a=args.model_a,
+            model_b=args.model_b,
+            profile_a=args.profile_a,
+            profile_b=args.profile_b,
+            speed=args.speed,
+            headless=headless,
+            frames=args.frames,
+        )
+    except ImportError as exc:
+        logger.error(f"pygame unavailable: {exc}")
         return 1
 
 

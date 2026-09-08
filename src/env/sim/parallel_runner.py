@@ -546,9 +546,10 @@ def _run_head_to_head(
     }
 
     # Unpack both genomes once for the whole matchup rather than on each of
-    # the several thousand ticks that follow.
-    agent1_policy = compile_genome(agent1_weights)
-    agent2_policy = compile_genome(agent2_weights)
+    # the several thousand ticks that follow. _ensure_compiled leaves already
+    # compiled stacks untouched, so custom-shaped nets keep their shape here.
+    agent1_policy = _ensure_compiled(agent1_weights)
+    agent2_policy = _ensure_compiled(agent2_weights)
 
     def play_block(bottom_key, bottom_genome, bottom_deck,
                    top_key, top_genome, top_deck, seed_base):
@@ -640,6 +641,27 @@ def _run_head_to_head(
     )
 
 
+def _is_compiled_policy(obj) -> bool:
+    """True for an already-unpacked layer stack (see models.policy.compile_genome)."""
+    return (isinstance(obj, tuple) and len(obj) >= 4
+            and isinstance(obj[0], np.ndarray) and obj[0].ndim == 2)
+
+
+def _ensure_compiled(weights, spec=None):
+    """Return ``weights`` as a compiled layer stack.
+
+    Compiled tuples pass through untouched (they already encode their own
+    shape); flat genomes are unpacked with ``spec`` -- which matters because a
+    custom network shape must not be re-interpreted against the default one.
+    """
+    if weights is None or _is_compiled_policy(weights):
+        return weights
+    # Three dots reach src/ (same as the module-level import above); two would
+    # wrongly resolve to src.env.models.policy.
+    from ...models.policy import DEFAULT_POLICY_SPEC, compile_genome
+    return compile_genome(np.asarray(weights).ravel(), spec or DEFAULT_POLICY_SPEC)
+
+
 def _run_matches(
     worker_id: int,
     config: WorkerConfig,
@@ -705,8 +727,8 @@ def _run_matches(
     max_ticks = config.match_duration_ticks + config.overtime_ticks + 100
 
     # Unpack once for every match this worker runs, not once per tick.
-    agent_policy = compile_genome(weights)
-    opponent_policy = compile_genome(opponent_weights)
+    agent_policy = _ensure_compiled(weights)
+    opponent_policy = _ensure_compiled(opponent_weights)
 
     for match_idx in range(config.match_count):
         # Distinct seed per match (resetting with one seed replayed the same

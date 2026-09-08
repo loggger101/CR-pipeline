@@ -9,6 +9,11 @@ population:
   size: 200                    # Number of agents per generation
   elite_count: 10              # Top agents preserved unchanged each generation
   elite_preservation: true     # Whether to preserve elites
+  hidden_layers: [64, 48, 32]  # Hidden layer widths of the evolved policy net.
+                               # Each entry is a tanh layer; features -> layers -> outputs.
+                               # Deeper/wider = more capacity (and slower eval):
+                               #   wide single layer:    hidden_layers: [128]
+                               #   deep default x2:      hidden_layers: [96, 96, 64, 32]
 
 # ── Selection Strategy ──────────────────────────────────────────────────────
 selection:
