@@ -20,6 +20,7 @@ from .validation import (
     ValidationType,
     ValidationError,
 )
+from .simulation import SimulationConfig
 
 __all__ = [
     "ConfigSchema",
@@ -30,4 +31,5 @@ __all__ = [
     "ValidationRule",
     "ValidationType",
     "ValidationError",
+    "SimulationConfig",
 ]

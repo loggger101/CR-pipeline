@@ -405,6 +405,40 @@ class TestMatchOutcomes:
         assert not engine.is_overtime
         assert engine.tick <= 25
 
+    def test_overtime_is_sudden_death(self):
+        """Real game: the first tower destroyed in overtime ends the match at
+        once, instead of playing out a fixed window and comparing crowns."""
+        engine = _engine(match_duration_ticks=10, overtime_ticks=200)
+
+        while not engine.is_overtime and not engine.terminated:
+            engine.step(Action.pass_action())
+        assert engine.is_overtime
+
+        tower = next(t for t in engine.player_towers if not t.is_king)
+        engine._damage_unit(tower, tower.max_hp, "opponent")
+
+        result = None
+        while not engine.terminated:
+            result = engine.step(Action.pass_action())
+
+        assert result.info["winner"] == "opponent"
+        assert result.info["reason"] == "overtime_sudden_death"
+        # The match ended the moment the crown was scored, well before the
+        # 200-tick window expired.
+        assert engine.tick < 10 + 200
+
+    def test_kings_wake_when_overtime_starts(self):
+        """Real game: both kings fight during overtime even if they never woke
+        in regulation."""
+        engine = _engine(match_duration_ticks=10, overtime_ticks=200)
+
+        while not engine.is_overtime and not engine.terminated:
+            engine.step(Action.pass_action())
+
+        for side in (engine.player_towers, engine.opponent_towers):
+            king = next(t for t in side if t.is_king)
+            assert king.is_active
+
     def test_reset_with_a_seed_is_reproducible(self):
         """Per-match seeding is what makes N matches informative."""
         engine = SimulationEngine(seed=1, record_replay=False)

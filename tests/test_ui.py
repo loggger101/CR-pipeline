@@ -20,8 +20,9 @@ from src.ui.arena_canvas import snapshot_from_engine
 from src.ui.jobs import JobContext, JobRunner
 from src.ui.operations import (
     MATCH_DURATIONS, SCRIPTED_OPPONENTS, TOURNAMENT_FORMATS,
-    build_training_config, evaluate_head_to_head, list_runs,
-    load_agent_genome, new_run_dir, play_match, resolve_runs_dir, run_training,
+    _spectator_pair, build_training_config, evaluate_head_to_head, list_runs,
+    load_agent_genome, new_run_dir, play_match, record_spectator_match,
+    resolve_runs_dir, run_training,
 )
 
 
@@ -315,6 +316,140 @@ class TestTrainingJob:
             assert result["cancelled"] is True
             assert result["generations_completed"] < 40
 
+    def test_streams_a_spectator_match_after_each_generation(self):
+        """The Train tab's live arena comes from these events."""
+        with tempfile.TemporaryDirectory() as tmp:
+            config = build_training_config(
+                _base_values(max_generations=2), new_run_dir(tmp))
+            runner = JobRunner()
+            events = _run_to_completion(
+                runner, lambda ctx: run_training(ctx, config))
+
+            errors = [e for e in events if e.kind == "error"]
+            assert not errors, errors[0].payload["traceback"] if errors else ""
+
+            # Each match follows its generation's progress event, so the UI
+            # shows it while the *next* generation is still evaluating.
+            sequence = [e.kind for e in events
+                        if e.kind in ("progress", "spectator")]
+            assert sequence == ["progress", "spectator"] * 2
+
+            for payload in (e.payload for e in events if e.kind == "spectator"):
+                assert payload["matchup"].startswith("champion vs")
+                recording = payload["recording"]
+                assert len(recording.frames) > 2
+                assert recording.winner in {"player", "opponent", "tie",
+                                            "none"}
+
+    def test_spectating_can_be_switched_off(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            config = build_training_config(
+                _base_values(max_generations=1), new_run_dir(tmp))
+            runner = JobRunner()
+            events = _run_to_completion(
+                runner,
+                lambda ctx: run_training(ctx, config, spectate_enabled=False))
+
+            kinds = [e.kind for e in events]
+            assert "spectator" not in kinds
+            assert kinds.count("progress") == 1   # training itself is intact
+
+    def test_a_broken_spectate_toggle_degrades_to_a_log_line(self):
+        """The toggle is read from the worker thread. If it raises (Tk does,
+        when touched off-thread), spectating must fail visibly in the log --
+        not vanish silently, and training must stay intact."""
+        with tempfile.TemporaryDirectory() as tmp:
+            config = build_training_config(
+                _base_values(max_generations=1), new_run_dir(tmp))
+
+            def broken():
+                raise RuntimeError("main thread is not in main loop")
+
+            runner = JobRunner()
+            events = _run_to_completion(
+                runner,
+                lambda ctx: run_training(ctx, config, spectate_enabled=broken))
+
+            errors = [e for e in events if e.kind == "error"]
+            assert not errors, errors[0].payload["traceback"] if errors else ""
+            logs = [e.payload for e in events
+                    if e.kind == "log" and isinstance(e.payload, str)]
+            assert any("spectate:" in line for line in logs)
+            assert [e.kind for e in events].count("progress") == 1
+
+
+class _SpectatorTrainerStub:
+    """Just enough trainer state for the spectator pairing logic."""
+
+    def __init__(self, best=None, hall=(), match_duration="short"):
+        self.best_genome = best
+        self.hall_of_fame = list(hall)
+
+        class _Config:  # only match_duration is read by record_spectator_match
+            pass
+
+        self.config = _Config()
+        self.config.match_duration = match_duration
+
+
+class TestSpectatorPairing:
+    """Which two agents a spectator match pits against each other."""
+
+    def test_no_pair_until_a_champion_exists(self):
+        assert _spectator_pair(_SpectatorTrainerStub()) is None
+
+    def test_prefers_the_most_recent_distinct_champion(self):
+        g1, g2, best = _genome(1), _genome(2), _genome(3)
+        trainer = _SpectatorTrainerStub(best=best, hall=[
+            (g1, {"id": "hof_gen0"}), (g2, {"id": "hof_gen4"})])
+        champion, rival, matchup = _spectator_pair(trainer)
+        assert np.array_equal(champion, best)
+        assert np.array_equal(rival, g2)   # the newest distinct predecessor
+        assert "hof_gen4" in matchup
+
+    def test_skips_a_hall_entry_identical_to_the_champion(self):
+        best = _genome(5)
+        trainer = _SpectatorTrainerStub(best=best, hall=[
+            (np.array(_genome(6)), {"id": "hof_gen0"}),
+            (np.array(best), {"id": "hof_gen1"})])   # newest is the same agent
+        champion, rival, matchup = _spectator_pair(trainer)
+        assert np.array_equal(rival, _genome(6))
+        assert "hof_gen0" in matchup
+
+    def test_falls_back_to_a_scripted_opponent(self):
+        best = _genome(7)
+        trainer = _SpectatorTrainerStub(
+            best=best, hall=[(np.array(best), {"id": "hof_gen0"})])
+        champion, rival, matchup = _spectator_pair(trainer)
+        assert np.array_equal(champion, best)
+        assert rival is None
+        assert "scripted" in matchup
+
+
+class TestSpectatorRecording:
+    """The match the Train tab plays while a generation evaluates."""
+
+    def test_records_a_playable_agent_vs_agent_match(self):
+        best, rival = _genome(1), _genome(2)
+        trainer = _SpectatorTrainerStub(best=best,
+                                        hall=[(rival, {"id": "hof_gen0"})])
+        ctx = JobContext(name="test", runner=JobRunner())
+        payload = record_spectator_match(ctx, trainer, generation=1)
+
+        assert payload["matchup"] == "champion vs hof_gen0"
+        recording = payload["recording"]
+        assert len(recording.frames) > 2
+        assert recording.winner in {"player", "opponent", "tie", "none"}
+        # Frames carry the same shape the arena renders.
+        frame = recording.frames[len(recording.frames) // 2]
+        for key in ("tick", "towers", "units", "player_elixir",
+                    "opponent_elixir"):
+            assert key in frame
+
+    def test_no_recording_without_a_champion(self):
+        ctx = JobContext(name="test", runner=JobRunner())
+        assert record_spectator_match(ctx, _SpectatorTrainerStub()) is None
+
 
 class TestEvaluationJob:
 
@@ -388,6 +523,22 @@ class TestWindow:
         assert "gen 4/10" in headline
         assert "1575" in headline
         assert app.training_tab.history["best"] == [1.5]
+
+    def test_training_tab_shows_and_plays_a_spectator_match(self, app):
+        runner = JobRunner()
+        events = _run_to_completion(
+            runner,
+            lambda ctx: play_match(ctx, _genome(1), opponent="balanced",
+                                   seed=3, match_duration_ticks=200))
+        recording = [e for e in events if e.kind == "done"][0].payload
+
+        app.training_tab._on_spectator({"matchup": "champion vs test rival",
+                                        "recording": recording})
+        app.update_idletasks()
+        assert "test rival" in app.training_tab.matchup.get()
+        assert len(app.training_tab.spectator_arena.find_all()) > 5
+        # The first match starts playing on its own.
+        assert app.training_tab._spectator_playing is True
 
     def test_arena_draws_a_snapshot(self, app):
         app.watch_tab.arena.show({

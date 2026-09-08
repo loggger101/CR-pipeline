@@ -138,3 +138,11 @@ class JobContext:
 
     def log(self, message: str) -> None:
         self.runner.post(JobEvent("log", message, self.name))
+
+    def event(self, kind: str, payload: Any = None) -> None:
+        """Post an arbitrary event under this job's name.
+
+        For kinds beyond ``progress``/``log`` (the training job uses it for
+        spectator matches); the owning tab decides how to render it.
+        """
+        self.runner.post(JobEvent(kind, payload, self.name))

@@ -273,6 +273,44 @@ class TestTournamentTraining:
                 trainer.train()
                 assert trainer.hall_of_fame == []
 
+    def test_eviction_keeps_the_most_diverse_champions(self):
+        """A sliding window drops the oldest champion even when a newer one is
+        nearly identical to the incoming one; that throws away the only
+        distinct reference opponent and invites cycling. Eviction must remove
+        the most-similar incumbent instead.
+
+        Layout on one genome axis: gen0 at 0, gen1 at 1 (close to gen0),
+        gen2 at 2. The old rule keeps {gen1, gen2}; diversity-aware eviction
+        drops gen1 (closest to gen2) and keeps the far-away gen0.
+        """
+        from types import SimpleNamespace
+
+        with tempfile.TemporaryDirectory() as tmp:
+            config = self._config(tmp, generations=3, hall_of_fame_size=2)
+            with EvolutionTrainer(config) as trainer:
+                base = _genome(7).copy()
+                p = 5
+
+                def variant(value: float) -> np.ndarray:
+                    g = base.copy()
+                    g[p] += value
+                    return g
+
+                def results(champion_fitness=1.0):
+                    # Champion is index 0 in both calls; argmax picks it.
+                    return [SimpleNamespace(fitness=champion_fitness, metadata={}),
+                            SimpleNamespace(fitness=0.5, metadata={})]
+
+                trainer._update_hall_of_fame([variant(0.0), _genome(8)], results(), 0)
+                trainer._update_hall_of_fame([variant(1.0), _genome(9)], results(), 1)
+                trainer._update_hall_of_fame([variant(2.0), _genome(10)], results(), 2)
+
+                ids = {meta["id"] for _, meta in trainer.hall_of_fame}
+                assert len(trainer.hall_of_fame) == 2
+                # gen0 (the distant incumbent) survived; the near-duplicate
+                # gen1 was evicted.
+                assert ids == {"hof_gen0", "hof_gen2"}
+
     def test_unknown_format_is_rejected_clearly(self):
         with tempfile.TemporaryDirectory() as tmp:
             config = self._config(tmp, tournament_format="knockout")

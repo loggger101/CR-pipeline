@@ -77,22 +77,8 @@ class ReportGenerator:
         Returns:
             Path to generated report.
         """
-        run_path = Path(run_dir)
-
-        # Load data
-        metrics_path = run_path / "metrics.json"
-        fitness_path = run_path / "fitness_history.json"
-
-        metrics = {}
-        fitness_history = {}
-
-        if metrics_path.exists():
-            with open(metrics_path) as f:
-                metrics = json.load(f)
-
-        if fitness_path.exists():
-            with open(fitness_path) as f:
-                fitness_history = json.load(f)
+        data = self.load_run_data(run_dir)
+        metrics, fitness_history = data["metrics"], data["fitness_history"]
 
         # Generate HTML
         html = self._generate_training_html(metrics, fitness_history, include_charts)
@@ -103,6 +89,59 @@ class ReportGenerator:
 
         logger.info(f"Training report generated: {output_path}")
         return str(output_path)
+
+    @staticmethod
+    def load_run_data(run_dir: str) -> Dict[str, Any]:
+        """Load and normalise a run directory into report-ready data.
+
+        Shared by the HTML/Markdown/JSON generators. The current trainer
+        writes ``best_score``/``generation`` at the run root and keeps the
+        evolution config inside each checkpoint folder; older runs may use
+        the historical names (``best_fitness``/``actual_generations``) directly.
+        """
+        run_path = Path(run_dir)
+
+        metrics: Dict[str, Any] = {}
+        fitness_history: Dict[str, List[float]] = {}
+
+        if (run_path / "metrics.json").exists():
+            with open(run_path / "metrics.json") as f:
+                metrics = json.load(f) or {}
+        if (run_path / "fitness_history.json").exists():
+            with open(run_path / "fitness_history.json") as f:
+                fitness_history = json.load(f) or {}
+
+        best_curve = fitness_history.get("best") or []
+        mean_curve = fitness_history.get("mean") or []
+        if "best_fitness" not in metrics:
+            if "best_score" in metrics:
+                metrics["best_fitness"] = metrics["best_score"]
+            elif best_curve:
+                metrics["best_fitness"] = max(best_curve)
+        if "mean_fitness" not in metrics and mean_curve:
+            metrics["mean_fitness"] = mean_curve[-1]
+        if "actual_generations" not in metrics and "total_generations" not in metrics:
+            if "generation" in metrics:
+                metrics["actual_generations"] = metrics["generation"]
+            elif best_curve:
+                metrics["actual_generations"] = len(best_curve)
+        # Alias for generators that read the shorter key.
+        metrics.setdefault("generations", metrics.get(
+            "actual_generations", metrics.get("total_generations", 0)))
+
+        gen_configs = sorted(run_path.glob("gen_*/config.json"))
+        if gen_configs and not all(k in metrics for k in ("elite_count", "crossover_rate")):
+            try:
+                with open(gen_configs[-1]) as f:
+                    cfg = json.load(f)
+                for key in ("elite_count", "crossover_rate", "mutation_rate",
+                            "mutation_std"):
+                    if key not in metrics and key in cfg:
+                        metrics[key] = cfg[key]
+            except (IOError, json.JSONDecodeError):
+                pass
+
+        return {"metrics": metrics, "fitness_history": fitness_history}
 
     def generate_experiment_report(
         self,
@@ -240,6 +279,10 @@ class ReportGenerator:
         best_fitness = metrics.get("best_fitness", 0)
         mean_fitness = metrics.get("mean_fitness", 0)
         diversity = metrics.get("diversity", 0)
+        # In tournament mode the trainer's best score is an ELO rating, not a
+        # fitness value; keep the label honest.
+        best_label = ("Best Score (ELO)"
+                      if metrics.get("best_score_kind") == "elo" else "Best Fitness")
 
         html = f"""<!DOCTYPE html>
 <html>
@@ -270,7 +313,7 @@ class ReportGenerator:
 
         <div class="metrics">
             <div class="metric-card">
-                <h3>Best Fitness</h3>
+                <h3>{best_label}</h3>
                 <div class="value">{best_fitness:.4f}</div>
             </div>
             <div class="metric-card">
@@ -306,7 +349,7 @@ class ReportGenerator:
 
         <div class="section">
             <h2>Summary</h2>
-            <p>This report summarizes the training run with best fitness of <strong>{best_fitness:.4f}</strong>
+            <p>This report summarizes the training run with a best score of <strong>{best_fitness:.4f}</strong> ({best_label.lower()})
             achieved over {metrics.get('actual_generations', metrics.get('total_generations', 'N/A'))} generations.</p>
         </div>
     </div>

@@ -27,9 +27,12 @@ constant rather than being consumed per-tick directly.
 Key mechanics
 -------------
 - Princess towers stand closer to the river than their king; the king starts
-  inactive and wakes on damage or on losing a princess tower.
+  inactive and wakes when a princess falls, once it has lost 25% of its max HP,
+  or when overtime begins (real Clash Royale rules).
 - Crowns accrue as towers fall (1 per princess, 3 for the king). A king kill
-  ends the match; otherwise crowns decide it at time, via overtime if level.
+  ends the match; otherwise crowns decide it at time. A level score goes to
+  up-to-a-minute sudden-death overtime with double elixir: the first tower
+  destroyed there wins immediately.
 - The deck is a fixed 8-card rotation with 4 in hand; playing a card cycles
   only that slot.
 - Troops deploy on their owner's half only; spells target the whole arena.
@@ -206,15 +209,26 @@ class SimulationEngine:
                        "skeleton_barrel", "mini_pekka", "electro_wizard", "tornado"],
     }
 
-    # Deploy cooldown in ticks
-    DEPLOY_COOLDOWN = 3
+    # Clash Royale has no per-slot deploy lockout: as soon as elixir is paid
+    # and a card is in hand it may be played (players routinely drop two cards
+    # within one second). The cooldown mechanism stays for feature encoding;
+    # the default of 0 matches the real game.
+    DEPLOY_COOLDOWN = 0
+
+    # Real-game king tower rule: the king stays dormant until a princess falls,
+    # it has taken damage equal to 25% of its max HP, or overtime begins. A
+    # single early spell hit must not wake it -- that is why "spiking" the
+    # king with Lightning works in the real game.
+    KING_ACTIVATION_HP_FRACTION = 0.75
 
     def __init__(
         self,
         deck: Optional[List[str]] = None,
         opponent_deck: Optional[List[str]] = None,
         match_duration_ticks: int = 1800,
-        overtime_ticks: int = 120,
+        # Real Clash Royale allows up to a minute of overtime; it is sudden
+        # death (first tower destroyed wins), so most resolve far sooner.
+        overtime_ticks: int = 600,
         elixir_regen_rate: Optional[float] = None,
         elixir_max: int = 10,
         double_elixir_overtime: bool = True,
@@ -228,7 +242,7 @@ class SimulationEngine:
             deck: Player's card deck (8 cards). Defaults to DEFAULT_DECK.
             opponent_deck: Opponent's card deck. Defaults to a shuffled DEFAULT_DECK.
             match_duration_ticks: Length of regulation match.
-            overtime_ticks: Additional ticks for overtime.
+            overtime_ticks: Maximum additional ticks for sudden-death overtime.
             elixir_regen_rate: Elixir regenerated per tick. Defaults to the
                 real-game rate (1 elixir per 2.8 seconds).
             elixir_max: Maximum elixir capacity.
@@ -281,6 +295,8 @@ class SimulationEngine:
         self.is_overtime: bool = False
         self.terminated: bool = False
         self.truncated: bool = False
+        # Side that won by scoring first in overtime (sudden death), or None.
+        self._overtime_decided: Optional[str] = None
 
         # Unit tracking
         self.player_units: List[UnitState] = []
@@ -358,6 +374,7 @@ class SimulationEngine:
         self.is_overtime = False
         self.terminated = False
         self.truncated = False
+        self._overtime_decided = None
 
         self.player_units = []
         self.opponent_units = []
@@ -762,9 +779,12 @@ class SimulationEngine:
         if unit.is_building and actual > 0:
             # Booked against the tower's owner: "damage taken by this side".
             self._tower_damage_dealt[unit.owner] += actual
-            # A king tower also wakes when it is damaged directly.
+            # Real-game rule: the king wakes only once it has lost a quarter of
+            # its max HP (or when a princess falls / overtime starts), not on
+            # any hit at all.
             if unit.is_king and unit.is_alive:
-                unit.is_active = True
+                if unit.hp <= unit.max_hp * self.KING_ACTIVATION_HP_FRACTION:
+                    unit.is_active = True
         if unit.just_died:
             self._handle_unit_death(unit)
         return actual
@@ -1149,10 +1169,16 @@ class SimulationEngine:
             self.player_towers_destroyed += 1
             self.opponent_trophies += self._crown_value(unit)
             self._activate_king("player")
+            # Real-game overtime is sudden death: the first tower destroyed in
+            # OT wins the match immediately.
+            if self.is_overtime:
+                self._overtime_decided = "opponent"
         else:
             self.opponent_towers_destroyed += 1
             self.player_trophies += self._crown_value(unit)
             self._activate_king("opponent")
+            if self.is_overtime:
+                self._overtime_decided = "player"
 
     def _crown_value(self, tower: UnitState) -> int:
         """Crowns awarded for destroying ``tower``."""
@@ -1198,6 +1224,17 @@ class SimulationEngine:
         fall, so the time-up comparison below reflects the whole match rather
         than only king kills.
         """
+        # Overtime sudden death: the first crown scored in OT ends the match.
+        if self._overtime_decided is not None:
+            winner = self._overtime_decided
+            loser = "opponent" if winner == "player" else "player"
+            self.terminated = True
+            return SimulationStepResult(
+                rewards={winner: 1.0, loser: -1.0},
+                terminated=True,
+                info={"winner": winner, "reason": "overtime_sudden_death"},
+            )
+
         player_king = next((t for t in self.player_towers if t.is_king), None)
         opp_king = next((t for t in self.opponent_towers if t.is_king), None)
 
@@ -1221,6 +1258,10 @@ class SimulationEngine:
         if not self.is_overtime and self.tick >= self.match_duration_ticks:
             if self.player_trophies == self.opponent_trophies and self.overtime_ticks > 0:
                 self.is_overtime = True
+                # In real Clash Royale both kings fight during overtime even if
+                # they never woke in regulation.
+                self._activate_king("player")
+                self._activate_king("opponent")
                 return SimulationStepResult(
                     rewards={"player": 0.0, "opponent": 0.0},
                     terminated=False,
