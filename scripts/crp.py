@@ -85,6 +85,11 @@ def cmd_train(args: argparse.Namespace) -> int:
         sim_config_path=args.sim_config,
         hidden_layers=args.hidden_layers,
     )
+    # GA-dynamics: CLI overrides the config defaults (None = keep default).
+    if args.champion_refinements is not None:
+        config.champion_refinements = max(0, int(args.champion_refinements))
+    if getattr(args, "no_adaptive_mutation", False):
+        config.ga_adaptive_mutation = False
 
     trainer = EvolutionTrainer(config)
     logger.info(f"Starting training: {config.max_generations} generations")
@@ -705,6 +710,11 @@ Examples:
                               metavar="WIDTH",
                               help="Hidden layer widths of the evolved policy net "
                                    "(default: 64 48 32). E.g. --hidden-layers 128 for a wide single layer.")
+    train_parser.add_argument("--champion-refinements", type=int, default=None, metavar="N",
+                              help="Offspring per generation that are gentle mutations of the run's "
+                                   "best genome (default: 2; set 0 to disable)")
+    train_parser.add_argument("--no-adaptive-mutation", action="store_true",
+                              help="Disable automatic mutation widening during stagnation")
 
     # Tournament command
     tour_parser = subparsers.add_parser("tournament", help="Run tournament evaluation")

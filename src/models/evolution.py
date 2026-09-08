@@ -14,6 +14,7 @@ Implements:
 from __future__ import annotations
 
 import logging
+import math
 from abc import ABC, abstractmethod
 from dataclasses import dataclass, field
 from enum import Enum, auto
@@ -866,6 +867,13 @@ class TournamentEvolutionStrategy:
         mutation_std: float = 0.1,
         seed: int = 42,
         rng: Optional[np.random.RandomState] = None,
+        selection_temperature: float = 1.0,
+        champion_refinements: int = 2,
+        adaptive_mutation: bool = False,
+        min_mutation_std: float = 0.01,
+        max_mutation_std: float = 0.3,
+        stagnation_window: int = 8,
+        immigration_threshold: Optional[float] = None,
     ):
         """Initialize the tournament evolution strategy.
 
@@ -876,9 +884,26 @@ class TournamentEvolutionStrategy:
             elite_fraction: Fraction of population that survives as elites.
             crossover_rate: Probability of crossover.
             mutation_rate: Per-weight mutation probability.
-            mutation_std: Mutation noise standard deviation.
+            mutation_std: Mutation noise standard deviation (baseline).
             seed: Random seed.
             rng: Random number generator.
+            selection_temperature: Softmax temperature for parent selection over
+                z-scored fitnesses. 1.0 gives the top agent a few-percent share
+                of draws instead of ~all; higher = weaker pressure, lower =
+                stronger. (The pre-2026-09 code softmaxed raw scores scaled by
+                100x, i.e. temperature ~0.001: selection was effectively argmax
+                and the population collapsed to clones of one lucky genome.)
+            champion_refinements: Number of offspring per generation that are
+                gentle mutations of the run's current best genome (exploitation
+                channel -- this is what makes each generation build on the last).
+            adaptive_mutation: Grow mutation std while no improvement lands,
+                shrink it when progress resumes.
+            min_mutation_std / max_mutation_std: Bounds for adaptive mutation.
+            stagnation_window: Consecutive non-improving generations before the
+                mutation step-up fires (adaptive mode only).
+            immigration_threshold: If the population's mean pairwise distance
+                drops below this, replace a few of the weakest slots with fresh
+                random genomes to break clone collapse. None disables it.
         """
         # Convert string format to enum
         format_map = {
@@ -897,6 +922,24 @@ class TournamentEvolutionStrategy:
         self.seed = seed
         self.rng = rng or np.random.RandomState(seed)
 
+        # Advanced GA state. _mutation_std is the *live* value (adaptive mode
+        # moves it); mutation_std stays as the configured baseline/floor anchor.
+        self.selection_temperature = max(1e-3, float(selection_temperature))
+        self.champion_refinements = max(0, int(champion_refinements))
+        self.adaptive_mutation = adaptive_mutation
+        self.min_mutation_std = min_mutation_std
+        self.max_mutation_std = max(min_mutation_std, max_mutation_std)
+        self.stagnation_window = max(1, int(stagnation_window))
+        # None enables immigration with a *scale-free* baseline: the first
+        # evolve call records the initial population's diversity and collapse is
+        # flagged when later generations fall below 25% of it. A float value
+        # pins an absolute mean-pairwise-distance threshold instead (useful if
+        # you know your genome scale). False disables immigration entirely.
+        self.immigration_threshold = immigration_threshold
+        self._baseline_diversity: float = 0.0
+        self._mutation_std = float(mutation_std)
+        self.stagnation_counter = 0
+
         # Tournament history
         self.tournament_history: List[dict] = []
         self.elo_history: Dict[str, List[float]] = {}
@@ -908,6 +951,8 @@ class TournamentEvolutionStrategy:
         current_fitnesses: Optional[List[float]] = None,
         evaluator: Optional[Any] = None,
         generation: int = 0,
+        champion_genome: Optional[np.ndarray] = None,
+        improved_this_generation: bool = False,
     ) -> Tuple[List[np.ndarray], dict]:
         """Evolve the population using tournament-based selection.
 
@@ -920,6 +965,12 @@ class TournamentEvolutionStrategy:
             current_fitnesses: Current fitness scores (fallback if no evaluator).
             evaluator: FitnessEvaluator for running tournaments.
             generation: Current generation number.
+            champion_genome: The run's best genome so far. When given, a few of
+                the offspring are gentle mutations of it -- an exploitation
+                channel that lets each generation build on the previous one
+                instead of only recombining this generation's field.
+            improved_this_generation: Whether the trainer recorded a new best
+                since the last evolve call; drives adaptive mutation scaling.
 
         Returns:
             Tuple of (new_population, info_dict).
@@ -984,18 +1035,53 @@ class TournamentEvolutionStrategy:
         info["tournament_rankings"] = tournament_rankings
         info["elo_ratings"] = elo_ratings
 
-        # Step 3: Create offspring using tournament-weighted selection.
-        # Parents are drawn from the *whole* field, elites included. Excluding
-        # elites (as this previously did) preserved the top performers as
-        # copies but barred them from passing on any genes, so every new
-        # genome descended only from agents the tournament had just ranked
-        # below them.
+        # Step 3a-prep: index-aligned scores for selection. ``tournament_rankings``
+        # is sorted by rank (best first), so a plain [score, ...] list would hand
+        # agent i the *i-th best* score instead of its own -- the old code was safe
+        # only because it looked ratings up in a dict keyed by id. Rebuild from the
+        # ranking's ids so selection sees each agent's true standing.
+        _aid_to_score = {str(aid): float(score) for aid, score in tournament_rankings}
+        tournament_fitnesses = [
+            _aid_to_score.get(f"agent_{i}", 0.0) for i in range(n)]
+
+        # Step 3a: Adaptive mutation scaling (only when enabled). While no new
+        # best lands, hold; after ``stagnation_window`` flat generations double
+        # the live std (bounded) so search widens instead of grinding in place.
+        # Progress decays it back toward the configured baseline.
+        if self.adaptive_mutation:
+            if improved_this_generation:
+                self.stagnation_counter = 0
+                self._mutation_std = max(
+                    self.mutation_std, self._mutation_std * 0.8)
+            else:
+                self.stagnation_counter += 1
+                if self.stagnation_counter >= self.stagnation_window:
+                    self._mutation_std = min(
+                        self.max_mutation_std, self._mutation_std * 2.0)
+
+        # Step 3b: Create offspring using tournament-weighted selection over the
+        # *z-scored* standings at a real temperature (see __init__). Parents are
+        # drawn from the whole field, elites included -- excluding them preserved
+        # the top performers as copies but barred them from passing on genes.
         offspring = []
         breeding_indices = list(range(n))
 
-        while len(offspring) < n - len(elite_indices):
+        slots_needed = n - len(elite_indices)
+
+        # Exploitation channel: a few gentle mutations of the run's best genome,
+        # so each generation can build directly on the previous one instead of
+        # only recombining this generation's field. Half rate keeps them close.
+        champion_slots = 0
+        if champion_genome is not None and slots_needed > 0:
+            champion_slots = min(self.champion_refinements, slots_needed)
+            for _ in range(champion_slots):
+                offspring.append(self._mutate(
+                    np.array(champion_genome, copy=True),
+                    rate=self.mutation_rate * 0.5))
+
+        while len(offspring) < slots_needed:
             parent1_idx, parent2_idx = self._select_parents_tournament(
-                breeding_indices, elo_ratings, self.rng
+                breeding_indices, tournament_fitnesses, self.rng
             )
 
             p1 = population[parent1_idx]
@@ -1008,13 +1094,42 @@ class TournamentEvolutionStrategy:
                 child1 = p1.copy()
                 child2 = p2.copy()
 
-            # Mutation
+            # Mutation (live std -- adaptive mode may have widened it)
             child1 = self._mutate(child1)
             child2 = self._mutate(child2)
 
             offspring.append(child1)
-            if len(offspring) < n - len(elite_indices):
+            if len(offspring) < slots_needed:
                 offspring.append(child2)
+
+        # Step 3c: Immigration -- a scale-free collapse guard. The first call
+        # records the initial (random) population's diversity as baseline; if a
+        # later generation falls below a quarter of that, blend-crossover and
+        # light mutation have converged to near-clones and selection pressure is
+        # sorting noise. Replace a few slots with fresh random genomes so the
+        # next tournament has something new to select on.
+        immigrants = 0
+        population_diversity = self._compute_diversity(population)
+        if n >= 8:
+            # Collapse threshold: an absolute float pins it; otherwise (None)
+            # use a scale-free baseline recorded on the first call.
+            collapse_below = None
+            if isinstance(self.immigration_threshold, (int, float)):
+                collapse_below = float(self.immigration_threshold)
+            elif self._baseline_diversity <= 0.0:
+                self._baseline_diversity = max(population_diversity, 1e-9)
+            else:
+                collapse_below = 0.25 * self._baseline_diversity
+
+            if (collapse_below is not None
+                    and population_diversity < collapse_below):
+                k = min(max(1, n // 20), len(offspring) - champion_slots)
+                if k > 0:
+                    slots = list(range(champion_slots, len(offspring)))
+                    for slot in self.rng.choice(slots, size=k, replace=False):
+                        offspring[int(slot)] = self._random_genome(
+                            len(offspring[0]))
+                        immigrants += 1
 
         # Step 4: Add elites (preserve top tournament performers)
         for elite_idx in elite_indices:
@@ -1023,6 +1138,11 @@ class TournamentEvolutionStrategy:
 
         # Trim to exact population size
         offspring = offspring[:n]
+
+        info["mutation_std"] = self._mutation_std
+        info["stagnation_counter"] = self.stagnation_counter
+        info["champion_refinements_used"] = champion_slots
+        info["immigrants"] = immigrants
 
         # Step 5: Record tournament info
         info["tournament_history"] = {
@@ -1039,7 +1159,9 @@ class TournamentEvolutionStrategy:
 
         logger.info(
             f"Tournament evolution gen {generation}: "
-            f"elite={elite_count}, diversity={diversity:.4f}"
+            f"elite={len(elite_indices)}, champion_refinements={champion_slots}, "
+            f"immigrants={immigrants}, mutation_std={self._mutation_std:.4f}, "
+            f"diversity={diversity:.4f}"
         )
 
         return offspring, info
@@ -1047,27 +1169,40 @@ class TournamentEvolutionStrategy:
     def _select_parents_tournament(
         self,
         indices: List[int],
-        elo_ratings: Dict[str, float],
+        fitnesses: List[float],
         rng: np.random.RandomState,
     ) -> Tuple[int, int]:
-        """Select parents using tournament-weighted selection.
+        """Select parents using tempered tournament-weighted selection.
 
-        Higher ELO ratings have higher selection probability.
+        Fitness is z-scored first so the softmax operates on *relative* standing
+        rather than raw magnitude -- raw scores (ELO ~1500 or composite fitness)
+        differ by far less than their scale, and a fixed 0.1 scaling made the
+        effective temperature near zero: one agent took ~all parent draws and
+        the population collapsed to its clones within a few generations. With
+        z-scored values at temperature ``selection_temperature``, the top agent
+        gets a strong but finite share of draws and mid-field agents still breed.
         """
         if len(indices) < 2:
             return indices[0], indices[0]
 
-        # Convert ELO to selection probabilities
-        elos = np.array([elo_ratings.get(f"agent_{i}", 1500.0) for i in indices], dtype=float)
-        # Softmax for probabilities
-        elos_shifted = elos - np.max(elos)
-        probs = np.exp(elos_shifted * 0.1)  # Scale ELO for numerical stability
-        probs /= probs.sum()
+        scores = np.array(
+            [float(fitnesses[i]) for i in indices], dtype=float)
+        # Guard a degenerate (all-equal) field: z-scoring would divide by zero.
+        sd = float(scores.std())
+        if not math.isfinite(sd) or sd < 1e-9:
+            probs = np.full(len(indices), 1.0 / len(indices))
+        else:
+            z = (scores - scores.mean()) / sd
+            # Temperature > 1 flattens the distribution; < 1 sharpens it.
+            logits = z * self.selection_temperature
+            logits -= logits.max()
+            probs = np.exp(logits)
+            probs /= probs.sum()
 
         parent1 = rng.choice(indices, p=probs)
         parent2 = rng.choice(indices, p=probs)
 
-        # Ensure different parents
+        # Ensure different parents (same-parent "crossover" is just a copy).
         attempts = 0
         while parent2 == parent1 and attempts < 10:
             parent2 = rng.choice(indices, p=probs)
@@ -1091,13 +1226,24 @@ class TournamentEvolutionStrategy:
 
         return offspring1, offspring2
 
-    def _mutate(self, weights: np.ndarray) -> np.ndarray:
-        """Gaussian mutation."""
-        mutation_mask = self.rng.random(size=weights.shape) < self.mutation_rate
-        noise = self.rng.randn(*weights.shape) * self.mutation_std
+    def _mutate(self, weights: np.ndarray, rate: Optional[float] = None) -> np.ndarray:
+        """Gaussian mutation using the *live* std (adaptive mode widens it)."""
+        effective_rate = self.mutation_rate if rate is None else float(rate)
+        mutation_mask = self.rng.random(size=weights.shape) < effective_rate
+        noise = self.rng.randn(*weights.shape) * self._mutation_std
         mutated = weights.copy()
         mutated[mutation_mask] += noise[mutation_mask]
         return mutated
+
+    def _random_genome(self, size: int) -> np.ndarray:
+        """Fresh genome for immigration.
+
+        Per-coordinate scale 1/sqrt(size) mirrors the per-layer Xavier-style
+        scaling of PolicySpec.random_genome (each weight ~N(0, 1/fan_in)); with
+        no spec available here a uniform scale is close enough -- immigrants are
+        exploration points, not calibrated agents.
+        """
+        return self.rng.randn(size) * np.sqrt(1.0 / max(1, size))
 
     def _compute_diversity(self, weights_list: List[np.ndarray]) -> float:
         """Compute population diversity as mean pairwise distance."""

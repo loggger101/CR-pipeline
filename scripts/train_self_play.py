@@ -115,6 +115,16 @@ def main():
         diversity_preservation=True, diversity_threshold=0.5,
         curriculum_learning=True, use_training_decks=True)
 
+    # GA-dynamics overrides from the yaml (absent keys keep defaults; explicit 0 disables).
+    _dyn = evolution_config.get("ga_dynamics") or {}
+    if (_ref := evolution_config.get("tournament", {}).get(
+            "champion_refinements")) is not None:
+        training_config.champion_refinements = int(_ref)
+    if "adaptive_mutation" in _dyn:
+        training_config.ga_adaptive_mutation = bool(_dyn["adaptive_mutation"])
+    if "stagnation_window" in _dyn:
+        training_config.ga_stagnation_window = int(_dyn["stagnation_window"])
+
     if args.max_gens:
         training_config.max_generations = args.max_gens
 

@@ -96,6 +96,14 @@ tournament:
   matches_per_pair: 4          # Matches per agent pair
   elite_fraction: 0.1          # Fraction of population as tournament candidates
   elo_k_factor: 32             # ELO update rate
+  champion_refinements: 2      # Offspring/generation that are gentle mutations of the
+                               # run's best genome (exploitation channel -- this is what
+                               # makes each generation build on the previous one)
+
+# ── Advanced GA Dynamics ────────────────────────────────────────────────────
+ga_dynamics:
+  adaptive_mutation: true      # Widen mutation std while no new best lands, shrink on progress
+  stagnation_window: 8         # Consecutive flat generations before the step-up fires
 
 # ── Diversity & Novelty ─────────────────────────────────────────────────────
 diversity:
