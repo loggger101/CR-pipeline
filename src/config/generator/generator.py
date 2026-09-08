@@ -161,7 +161,9 @@ class ConfigGenerator:
     def _gen_sim_standard(self) -> Dict[str, Any]:
         return {
             "arena": {"width": 8, "height": 6, "left_lane": [0, 1, 2, 3], "right_lane": [4, 5, 6, 7], "bridges": [3, 4]},
-            "game_rules": {"match_duration_ticks": 1800, "overtime_duration_ticks": 120, "elixir_max": 10, "elixir_regen_rate": 0.3, "elixir_double_overtime": True, "win_condition": "trophies"},
+            # Real-game rules: 180s regulation, up to 60s sudden-death OT,
+            # elixir regen of 1 per 2.8s (0.0357 per tick at 10 ticks/s).
+            "game_rules": {"match_duration_ticks": 1800, "overtime_ticks": 600, "elixir_max": 10, "elixir_regen_rate": 0.0357, "double_elixir_overtime": True, "win_condition": "trophies"},
             "state_input": {"resolution": 64, "total_channels": 11},
             "augmentation": {"enabled": True, "intensity": 0.5, "strategies": {"deck_composition": True, "card_order": True, "opponent_strategy": True}},
         }
@@ -169,7 +171,7 @@ class ConfigGenerator:
     def _gen_sim_detailed(self) -> Dict[str, Any]:
         return {
             "arena": {"width": 8, "height": 6, "left_lane": [0, 1, 2, 3], "right_lane": [4, 5, 6, 7], "bridges": [3, 4]},
-            "game_rules": {"match_duration_ticks": 1800, "overtime_duration_ticks": 120, "elixir_max": 10, "elixir_regen_rate": 0.3, "elixir_double_overtime": True, "win_condition": "trophies"},
+            "game_rules": {"match_duration_ticks": 1800, "overtime_ticks": 600, "elixir_max": 10, "elixir_regen_rate": 0.0357, "double_elixir_overtime": True, "win_condition": "trophies"},
             "state_input": {"resolution": 64, "total_channels": 11},
             "augmentation": {"enabled": True, "intensity": 0.8, "strategies": {"deck_composition": True, "card_order": True, "opponent_strategy": True, "game_conditions": True, "elixir_advantage": True, "timing": True}},
         }

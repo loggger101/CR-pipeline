@@ -23,12 +23,12 @@ Examples:
     crp hpo --optimizer bayesian --trials 50
     crp export --model best --formats torch,onnx,numpy
     crp report --experiment exp_123 --type training
-    crp compare --runs run_1 run_2 run_3
+    crp compare run_1 run_2 run_3
     crp dashboard --runs-dir runs
-    crp pipelines --list
-    crp pipelines --run evolution
+    crp pipelines list
+    crp pipelines run --name evolution
     crp search --generations 50 --population 20
-    crp benchmark --model my_model.pt --input-shape 1,8,6,16
+    crp benchmark --model my_model.pt --input-shape 1024,64
 """
 
 import argparse
@@ -81,6 +81,8 @@ def cmd_train(args: argparse.Namespace) -> int:
         enable_alerts=args.alerts,
         enable_registry=args.registry,
         collect_matches=args.collect_matches,
+        enable_experiment_tracking=args.experiments,
+        sim_config_path=args.sim_config,
     )
 
     trainer = EvolutionTrainer(config)
@@ -146,34 +148,66 @@ def cmd_tournament(args: argparse.Namespace) -> int:
 
 
 def cmd_hpo(args: argparse.Namespace) -> int:
-    """Handle HPO command."""
+    """Handle HPO command.
+
+    Each optimizer trial runs a short, real training run and scores it by the
+    best fitness reached (ELO in tournament mode, anchored at 1500 so trials
+    are comparable). Trials execute on a reduced budget -- population capped
+    at ``--pop-size``, ``--gens`` generations -- as a proxy for full-scale
+    runs; a ranking that holds under trial budgets tends to hold at scale.
+    """
+    import shutil
+    import tempfile
+
     from src.train import (
         BayesianOptimizer,
         GridSearchOptimizer,
         RandomSearchOptimizer,
-        ParamSpace,
-        ParamType,
+        EvolutionTrainer,
+        TrainingConfig,
         get_default_evolution_search_space,
     )
 
     search_space = get_default_evolution_search_space()
+    pop_cap = max(4, int(args.pop_size))
+    trial_counter = {"n": 0}
 
-    # Define objective function
+    # Define objective function: one short real training run per candidate.
     def objective(params):
-        # Simulated objective
-        pop_size = params.get("population_size", 200)
-        mutation_rate = params.get("mutation_rate", 0.05)
-        crossover_rate = params.get("crossover_rate", 0.7)
+        trial_counter["n"] += 1
+        n = trial_counter["n"]
+        pop_size = max(4, min(int(params.get("population_size", pop_cap)), pop_cap))
+        elite_count = max(1, min(int(params.get("elite_count", 4)), pop_size // 5 or 1))
 
-        # Simulated fitness (higher is better)
-        fitness = (
-            10.0
-            - abs(pop_size - 200) * 0.01
-            - abs(mutation_rate - 0.05) * 10
-            - abs(crossover_rate - 0.7) * 5
-            + np.random.randn() * 0.1
+        run_dir = Path(tempfile.mkdtemp(prefix=f"hpo_trial_{n}_"))
+        config = TrainingConfig(
+            population_size=pop_size,
+            elite_count=elite_count,
+            crossover_rate=float(params.get("crossover_rate", 0.7)),
+            mutation_rate=float(params.get("mutation_rate", 0.05)),
+            mutation_std=float(params.get("mutation_std", 0.1)),
+            diversity_threshold=float(params.get("diversity_threshold", 0.5)),
+            max_generations=int(args.gens),
+            runs_dir=str(run_dir),
+            # Distinct seed per trial so candidates are not graded on the
+            # same set of matches; identical within a trial (common numbers).
+            seed=args.seed + n * 97,
         )
-        return fitness
+        logger.info(f"HPO trial {n}: pop={pop_size} elite={elite_count} "
+                    f"cross={config.crossover_rate:.2f} mut={config.mutation_rate}")
+        try:
+            with EvolutionTrainer(config) as trainer:
+                trainer.train()
+                score = trainer.best_fitness
+                if not np.isfinite(score):
+                    score = 0.0
+                logger.info(f"HPO trial {n} scored {score:.3f}")
+        except Exception as exc:
+            logger.warning(f"HPO trial {n} failed: {exc}")
+            return -1.0
+        finally:
+            shutil.rmtree(run_dir, ignore_errors=True)
+        return float(score)
 
     if args.optimizer == "bayesian":
         optimizer = BayesianOptimizer(
@@ -267,7 +301,45 @@ def cmd_export(args: argparse.Namespace) -> int:
 def cmd_report(args: argparse.Namespace) -> int:
     """Handle report command."""
     from src.train import ExperimentTracker
-    from src.viz import ReportGenerator
+    from src.viz import ReportGenerator, ReportType
+
+    def _report_run(run_dir: Path) -> int:
+        fmt = (args.format or "html").lower()
+        default_names = {
+            "html": "training_report.html",
+            "markdown": "training_report.md",
+            "json": "training_report.json",
+        }
+        if fmt not in default_names:
+            logger.error(f"Unsupported report format: {fmt}")
+            return 1
+        reporter = ReportGenerator(output_dir="reports")
+        filename = Path(args.output).name if args.output else default_names[fmt]
+
+        data = reporter.load_run_data(str(run_dir))
+        if fmt == "markdown":
+            report = reporter.generate_markdown_report(
+                data["metrics"], ReportType.TRAINING, filename)
+        elif fmt == "json":
+            payload = {"type": "training", **data["metrics"]}
+            payload["fitness_history"] = data["fitness_history"]
+            report = reporter.generate_json_report(payload, filename)
+        else:
+            report = reporter.generate_training_report(str(run_dir), filename)
+
+        print(f"Report generated: {report}")
+        return 0
+
+    # A run directory (e.g. runs/run_20260814_120000 or any path containing a
+    # trainer-written metrics.json) is the common case; report straight from it.
+    candidate = Path(args.experiment) if args.experiment else None
+    if candidate is not None and (candidate / "metrics.json").exists():
+        return _report_run(candidate)
+    # Also accept a bare run id under the runs directory.
+    if candidate is not None:
+        root = Path("runs") / args.experiment
+        if (root / "metrics.json").exists():
+            return _report_run(root)
 
     tracker = ExperimentTracker(tracking_dir=args.experiments_dir)
 
@@ -277,7 +349,7 @@ def cmd_report(args: argparse.Namespace) -> int:
             logger.error(f"Experiment {args.experiment} not found")
             return 1
 
-        reporter = ReportGenerator(output_dir=args.output_dir)
+        reporter = ReportGenerator(output_dir="reports")
 
         if args.type == "training":
             report = tracker.generate_report(args.experiment, args.metric, args.output)
@@ -303,6 +375,47 @@ def cmd_report(args: argparse.Namespace) -> int:
 def cmd_compare(args: argparse.Namespace) -> int:
     """Handle compare command."""
     from src.train import ExperimentTracker
+
+    # Prefer real run directories (what the trainer writes); training does not
+    # register with the experiment tracker, so this is usually the only data.
+    resolved = []
+    for ref in args.runs:
+        path = Path(ref)
+        if (path / "metrics.json").exists():
+            resolved.append(path.parent if path.is_dir() else None)
+        elif (Path("runs") / ref / "metrics.json").exists():
+            resolved.append(Path("runs"))
+    real_run_dirs = [d for d in resolved if d is not None]
+
+    if len(real_run_dirs) == len(args.runs):
+        from src.viz import RunManager
+
+        runs_dir = str(next(iter(set(str(d) for d in real_run_dirs))))
+        manager = RunManager(runs_dir=runs_dir)
+        run_ids = [Path(ref).name if (Path(ref) / "metrics.json").exists()
+                   else ref for ref in args.runs]
+        metric = {"best_fitness": "best", "mean_fitness": "mean",
+                  "median_fitness": "median"}.get(args.metric, args.metric)
+        comparison = manager.compare_runs(run_ids, metric=metric)
+
+        print("\n" + "=" * 60)
+        print("RUN COMPARISON")
+        print("=" * 60)
+        print(f"Metric: {args.metric}")
+        summary = comparison.get("summary", {})
+        avg_imp = summary.get("avg_improvement", "N/A")
+        print(f"Best Run: {summary.get('best_run', 'N/A')}")
+        print(f"Best Value: {summary.get('best_overall', 'N/A')}")
+        print(f"Avg Improvement: {avg_imp:.4f}" if isinstance(avg_imp, float)
+              else f"Avg Improvement: {avg_imp}")
+        print("-" * 60)
+
+        for run in comparison.get("runs", []):
+            print(f"  {run['id']}: best={run['best_value']:.4f}, "
+                  f"final={run['final_value']:.4f}, generations={run['length']}")
+
+        print("=" * 60)
+        return 0
 
     tracker = ExperimentTracker(tracking_dir=args.experiments_dir)
 
@@ -422,7 +535,13 @@ def cmd_pipelines(args: argparse.Namespace) -> int:
 
 
 def cmd_search(args: argparse.Namespace) -> int:
-    """Handle architecture search command."""
+    """Handle architecture search command.
+
+    Topology exploration only: candidates are scored with a deterministic
+    structural proxy (depth up to a point, parameter budget penalty), NOT
+    trained performance -- the evolved policy is a NumPy MLP, and Torch
+    architectures would need real training data to be scored honestly.
+    """
     from src.models import ArchitectureEvolver, ArchitectureRegistry
 
     evolver = ArchitectureEvolver(
@@ -432,9 +551,16 @@ def cmd_search(args: argparse.Namespace) -> int:
     )
     evolver.initialize_population()
 
-    # Simple fitness function
+    # Structural proxy objective: reward depth up to 8 layers, penalise
+    # parameter counts beyond a modest budget. Deterministic on purpose --
+    # a noisy score here would be indistinguishable from luck.
+    PARAM_BUDGET = 20_000
+
     def fitness_fn(arch):
-        return len(arch.layers) * 0.1 + np.random.randn() * 0.01
+        params = getattr(arch, "num_parameters", 0) or 0
+        depth_score = min(len(arch.layers), 8) * 0.1
+        budget_penalty = max(0.0, (params - PARAM_BUDGET) / PARAM_BUDGET)
+        return depth_score - budget_penalty
 
     print(f"Running architecture search for {args.generations} generations...")
     best_arch, info = evolver.evolve_generation(
@@ -444,40 +570,55 @@ def cmd_search(args: argparse.Namespace) -> int:
     )
 
     if best_arch:
-        print(f"\nBest Architecture:")
+        print(f"\nBest Architecture (by structural proxy, not trained performance):")
         print(f"  Name: {best_arch.name}")
         print(f"  Layers: {len(best_arch.layers)}")
         print(f"  Parameters: {best_arch.num_parameters}")
-        print(f"  Final Fitness: {info['final_fitness']:.4f}")
+        print(f"  Structural score: {info['final_fitness']:.4f}")
 
     return 0
 
 
 def cmd_benchmark(args: argparse.Namespace) -> int:
-    """Handle benchmark command."""
+    """Handle benchmark command.
+
+    Benchmarks the evolved policy's real inference path -- the same NumPy
+    forward used inside every match (features -> tanh hidden -> outputs).
+    Input shape is ``BATCH,64``; 64 is the policy feature dimension and is
+    validated so a meaningless tensor shape cannot be benchmarked.
+    """
     from src.deploy import InferenceBenchmarker
+    from src.models.policy import FEATURE_DIM, compile_genome
 
     # Load model
-    model_path = Path(args.model)
-    import torch
-    checkpoint = load_checkpoint(str(model_path))
+    checkpoint = load_checkpoint(str(args.model))
 
     if isinstance(checkpoint, dict) and "weights" in checkpoint:
-        weights = np.array(checkpoint["weights"])
+        genome = np.asarray(checkpoint["weights"]).ravel()
     else:
-        weights = np.array(checkpoint)
+        genome = np.asarray(checkpoint).ravel()
 
-    # Create simple model function
+    # Parse input shape (batch, features); features must be the policy dim.
+    dims = [int(x) for x in args.input_shape.split(",")]
+    if len(dims) != 2 or dims[1] != FEATURE_DIM:
+        logger.error(f"--input-shape must be 'BATCH,{FEATURE_DIM}' "
+                     f"(the policy feature dimension), got '{args.input_shape}'")
+        return 1
+    batch, feat = dims
+
+    # Compile the genome once (as matches do) and run its exact forward pass.
+    w1, b1, w2, b2 = compile_genome(genome)
+
     def model_fn(x):
-        return x @ weights.T[:x.shape[1]] if x.shape[1] <= weights.shape[0] else x @ weights[:x.shape[1]].T
-
-    # Parse input shape
-    input_shape = tuple(int(x) for x in args.input_shape.split(","))
+        x = np.asarray(x, dtype=np.float64).reshape(batch, feat)
+        hidden = np.tanh(x @ w1 + b1)
+        out = hidden @ w2 + b2
+        return np.concatenate([out[:, :5], np.tanh(out[:, 5:7])], axis=1)
 
     benchmarker = InferenceBenchmarker()
     results = benchmarker.benchmark(
         model_fn=model_fn,
-        input_shape=input_shape,
+        input_shape=(batch, feat),
         n_runs=args.n_runs,
         warmup_runs=args.warmup,
     )
@@ -511,11 +652,11 @@ Examples:
   crp hpo --optimizer bayesian --trials 50
   crp export --model best.pt --formats torch,onnx,numpy
   crp report --experiment exp_123
-  crp compare --runs run_1 run_2 run_3
+  crp compare run_1 run_2 run_3
   crp dashboard --runs-dir runs
-  crp pipelines --list
+  crp pipelines list
   crp search --generations 50
-  crp benchmark --model model.pt --input-shape 1,8,6,16
+  crp benchmark --model model.pt --input-shape 1024,64
         """,
     )
 
@@ -532,8 +673,17 @@ Examples:
     train_parser.add_argument("--crossover-rate", type=float, default=0.7)
     train_parser.add_argument("--mutation-rate", type=float, default=0.05)
     train_parser.add_argument("--mutation-std", type=float, default=0.1)
-    train_parser.add_argument("--tournament", action="store_true", help="Use tournament mode")
-    train_parser.add_argument("--tournament-format", default="round_robin")
+    # Tournament self-play is the project's main training loop and the
+    # TrainingConfig default; the CLI must not silently fall back to scripted
+    # opponents. Opt out explicitly with --no-tournament.
+    # BooleanOptionalAction auto-adds the --no-tournament counterpart.
+    train_parser.add_argument("--tournament",
+                              action=argparse.BooleanOptionalAction,
+                              default=True,
+                              help="Tournament self-play (default) vs scripted opponents")
+    train_parser.add_argument("--tournament-format", default="swiss",
+                              choices=["swiss", "round_robin", "single_elim",
+                                       "double_elim", "league"])
     train_parser.add_argument("--tournament-matches", type=int, default=4)
     train_parser.add_argument("--workers", "-w", type=int, default=4)
     train_parser.add_argument("--runs-dir", "-r", default="runs")
@@ -542,8 +692,12 @@ Examples:
     # Monitoring & registry flags
     train_parser.add_argument("--monitor", action="store_true", help="Enable resource monitoring")
     train_parser.add_argument("--alerts", action="store_true", help="Enable alerting")
+    train_parser.add_argument("--experiments", action="store_true",
+                              help="Log this run to the experiment tracker (crp experiments)")
     train_parser.add_argument("--registry", action="store_true", help="Enable model registry")
     train_parser.add_argument("--collect-matches", action="store_true", help="Collect match data")
+    train_parser.add_argument("--sim-config", default=None,
+                              help="Path to sim_game.yaml (overrides engine defaults)")
 
     # Tournament command
     tour_parser = subparsers.add_parser("tournament", help="Run tournament evaluation")
@@ -563,6 +717,10 @@ Examples:
     hpo_parser.add_argument("--initial", type=int, default=10)
     hpo_parser.add_argument("--grid-points", type=int, default=5)
     hpo_parser.add_argument("--patience", type=int, default=5)
+    hpo_parser.add_argument("--pop-size", type=int, default=32,
+                            help="Population cap for each trial run (default 32)")
+    hpo_parser.add_argument("--gens", type=int, default=3,
+                            help="Generations per trial run (default 3)")
     hpo_parser.add_argument("--seed", "-s", type=int, default=42)
 
     # Export command
@@ -579,16 +737,22 @@ Examples:
 
     # Report command
     report_parser = subparsers.add_parser("report", help="Generate reports")
-    report_parser.add_argument("--experiment", "-e", type=str, default=None)
+    report_parser.add_argument("--experiment", "-e", type=str, default=None,
+                               help="Experiment id, or a run directory / run id under runs/")
     report_parser.add_argument("--type", "-t", default="training",
                                choices=["training", "experiment", "tournament"])
     report_parser.add_argument("--metric", default="best_fitness")
-    report_parser.add_argument("--output", "-o", type=str, default=None)
+    report_parser.add_argument("--format", default="html",
+                               choices=["html", "markdown", "json"],
+                               help="Report format (default html)")
+    report_parser.add_argument("--output", "-o", type=str, default=None,
+                               help="Output filename for the generated report")
     report_parser.add_argument("--experiments-dir", default="experiment_tracking")
 
     # Compare command
     compare_parser = subparsers.add_parser("compare", help="Compare runs")
-    compare_parser.add_argument("runs", nargs="+", help="Run IDs to compare")
+    compare_parser.add_argument("runs", nargs="+",
+                                help="Run IDs (under runs/) or run directories")
     compare_parser.add_argument("--metric", "-m", default="best_fitness")
     compare_parser.add_argument("--experiments-dir", default="experiment_tracking")
 
@@ -609,7 +773,8 @@ Examples:
 
     # Pipelines command
     pipe_parser = subparsers.add_parser("pipelines", help="Manage pipelines")
-    pipe_parser.add_argument("action", choices=["list", "run"])
+    pipe_parser.add_argument("action", nargs="?", choices=["list", "run"],
+                             default="list")
     pipe_parser.add_argument("--name", "-n", type=str, default=None)
     pipe_parser.add_argument("--pop-size", type=int, default=200)
     pipe_parser.add_argument("--max-gens", type=int, default=100)
@@ -618,7 +783,9 @@ Examples:
     pipe_parser.add_argument("--trials", type=int, default=50)
 
     # Search command
-    search_parser = subparsers.add_parser("search", help="Run architecture search")
+    search_parser = subparsers.add_parser(
+        "search",
+        help="Explore network topologies (structural proxy score, not trained performance)")
     search_parser.add_argument("--generations", "-g", type=int, default=50)
     search_parser.add_argument("--population", "-p", type=int, default=20)
     search_parser.add_argument("--elite-fraction", type=float, default=0.2)
@@ -627,7 +794,8 @@ Examples:
     # Benchmark command
     bench_parser = subparsers.add_parser("benchmark", help="Benchmark models")
     bench_parser.add_argument("--model", "-m", required=True)
-    bench_parser.add_argument("--input-shape", type=str, default="1,8,6,16")
+    bench_parser.add_argument("--input-shape", type=str, default="1024,64",
+                              help="Batch shape BATCH,FEATURES (features must be 64)")
     bench_parser.add_argument("--n-runs", type=int, default=100)
     bench_parser.add_argument("--warmup", type=int, default=10)
 

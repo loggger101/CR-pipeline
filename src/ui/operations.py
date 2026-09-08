@@ -180,21 +180,47 @@ def build_training_config(values: Dict[str, Any], runs_dir: str) -> TrainingConf
     )
 
 
-def run_training(ctx: JobContext, config: TrainingConfig) -> Dict[str, Any]:
+def run_training(ctx: JobContext, config: TrainingConfig,
+                 spectate_enabled=None) -> Dict[str, Any]:
     """Run a training job, streaming per-generation progress to ``ctx``.
 
     Stopping is cooperative: the trainer checks its ``running`` flag between
     generations, so a cancel takes effect once the current generation
     finishes rather than tearing down a tournament mid-flight.
+
+    With spectating on (the default), each completed generation also posts a
+    ``spectator`` event carrying one recorded match between champions, so the
+    Train tab can show live arena action while the next generation evaluates.
+    ``spectate_enabled`` may be a bool or a zero-argument callable checked at
+    every generation, which lets the UI toggle it mid-run. Spectating runs in
+    this same worker thread -- one match per generation, sequential with the
+    tournament pool rather than competing for CPU with it -- and any failure
+    is logged without disturbing training.
     """
     trainer = EvolutionTrainer(config)
     history: List[dict] = []
+
+    def _spectating() -> bool:
+        if spectate_enabled is None:
+            return True
+        value = (spectate_enabled()
+                 if callable(spectate_enabled) else spectate_enabled)
+        return bool(value)
 
     def on_generation(snapshot: dict) -> None:
         history.append(snapshot)
         ctx.progress(snapshot)
         if ctx.cancelled:
             trainer.stop()
+            return
+        try:
+            if _spectating():
+                payload = record_spectator_match(
+                    ctx, trainer, snapshot["generation"])
+                if payload is not None:
+                    ctx.event("spectator", payload)
+        except Exception as exc:  # surfaced in the log pane, never raised
+            ctx.log(f"spectate: {exc}")
 
     trainer.on_generation = on_generation
     started = time.time()
@@ -224,6 +250,68 @@ def run_training(ctx: JobContext, config: TrainingConfig) -> Dict[str, Any]:
         "cancelled": ctx.cancelled,
         "history": history,
     }
+
+
+# ---------------------------------------------------------------------------
+# Spectating champions during training
+# ---------------------------------------------------------------------------
+
+# Mirrors EvolutionTrainer._evaluate_against_scripted's duration map, so the
+# spectator match runs as long as the ones actually being trained on.
+_MATCH_DURATION_TICKS = {"short": 600, "full": 1800, "overtime": 2400}
+
+
+def _spectator_pair(trainer) -> Optional[tuple]:
+    """Choose the two sides for one spectator match.
+
+    The reigning champion (``trainer.best_genome``) plays its most recent
+    distinct predecessor from the hall of fame -- a real agent-vs-agent game,
+    which is what shows the work being done. When every past champion is this
+    same genome (early generations, or one dominant line), it faces a scripted
+    opponent instead so there is still something to watch.
+
+    Returns ``(champion_genome, rival_genome_or_None, matchup_label)``, or
+    ``None`` until a champion exists at all.
+    """
+    champion = getattr(trainer, "best_genome", None)
+    if champion is None:
+        return None
+    champion = np.asarray(champion)
+
+    hall = list(getattr(trainer, "hall_of_fame", ()) or ())
+    for genome, meta in reversed(hall):
+        rival = np.asarray(genome)
+        if not np.array_equal(rival, champion):
+            name = (meta.get("id") or "past champion"
+                    ) if isinstance(meta, dict) else "past champion"
+            return champion, rival, f"champion vs {name}"
+    return champion, None, "champion vs scripted opponent"
+
+
+def record_spectator_match(ctx: JobContext, trainer,
+                           generation: int = 0) -> Optional[Dict[str, Any]]:
+    """Simulate one match between champions and capture it for playback.
+
+    Simulated as fast as possible (the UI animates the recording at its own
+    speed), so the cost is a single full match -- comfortably inside one
+    generation's wall time. A fresh seed per generation keeps consecutive
+    replays from being identical when the same pair meets twice.
+    """
+    pair = _spectator_pair(trainer)
+    if pair is None or ctx.cancelled:
+        return None
+    champion, rival, matchup = pair
+    config = getattr(trainer, "config", None)
+    duration_ticks = _MATCH_DURATION_TICKS.get(
+        getattr(config, "match_duration", "full"), 1800)
+    recording = play_match(
+        ctx, champion,
+        opponent="balanced",
+        opponent_genome=rival,
+        seed=7 + 31 * max(1, int(generation)),
+        match_duration_ticks=duration_ticks,
+    )
+    return {"matchup": matchup, "recording": recording}
 
 
 # ---------------------------------------------------------------------------

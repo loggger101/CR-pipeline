@@ -516,6 +516,10 @@ def _run_head_to_head(
     seed: int = 42,
     deck: Optional[List[str]] = None,
     opponent_deck: Optional[List[str]] = None,
+    # Simulation overrides
+    match_duration_ticks: Optional[int] = None,
+    overtime_ticks: Optional[int] = None,
+    elixir_regen_rate: Optional[float] = None,
 ) -> MatchResult:
     """Run head-to-head matches between two agents.
 
@@ -561,6 +565,11 @@ def _run_head_to_head(
             engine = SimulationEngine(
                 deck=bottom_deck,
                 opponent_deck=top_deck,
+                match_duration_ticks=(match_duration_ticks
+                                     if match_duration_ticks is not None
+                                     else 1800),
+                overtime_ticks=overtime_ticks if overtime_ticks is not None else 120,
+                elixir_regen_rate=elixir_regen_rate,
                 seed=seed_base + i * 100,
                 record_replay=False,
             )
@@ -849,6 +858,10 @@ class ParallelRunner:
         deck: Optional[List[str]] = None,
         opponent_deck: Optional[List[str]] = None,
         seed: int = 42,
+        # Simulation parameters (override engine defaults)
+        match_duration_ticks: Optional[int] = None,
+        overtime_ticks: Optional[int] = None,
+        elixir_regen_rate: Optional[float] = None,
     ) -> List[MatchResult]:
         """Evaluate the fitness of a population of agents.
 
@@ -882,6 +895,13 @@ class ParallelRunner:
                 opponent_deck=opponent_deck,
                 opponent_type=opponent_type,
             )
+            # Wire simulation config overrides through to each worker
+            if match_duration_ticks is not None:
+                config.match_duration_ticks = match_duration_ticks
+            if overtime_ticks is not None:
+                config.overtime_ticks = overtime_ticks
+            if elixir_regen_rate is not None:
+                config.elixir_regen_rate = elixir_regen_rate
             tasks.append((i, config, weights, opponent_type, opponent_weights))
 
         raw_results = self.pool.starmap(
@@ -926,6 +946,10 @@ class ParallelRunner:
         seed: int = 42,
         deck: Optional[List[str]] = None,
         opponent_deck: Optional[List[str]] = None,
+        # Simulation overrides
+        match_duration_ticks: Optional[int] = None,
+        overtime_ticks: Optional[int] = None,
+        elixir_regen_rate: Optional[float] = None,
     ) -> MatchResult:
         """Run head-to-head matches between two agents.
 
@@ -938,6 +962,9 @@ class ParallelRunner:
             seed: Random seed.
             deck: Card deck for agent 1.
             opponent_deck: Card deck for agent 2.
+            match_duration_ticks: Override regulation length in ticks.
+            overtime_ticks: Override overtime duration in ticks.
+            elixir_regen_rate: Override elixir regen per tick (None → default).
 
         Returns:
             MatchResult with combined stats.
@@ -950,6 +977,9 @@ class ParallelRunner:
             seed=seed,
             deck=deck,
             opponent_deck=opponent_deck,
+            match_duration_ticks=match_duration_ticks,
+            overtime_ticks=overtime_ticks,
+            elixir_regen_rate=elixir_regen_rate,
         )
 
     def run_pairings(
@@ -960,6 +990,10 @@ class ParallelRunner:
         seed: int = 42,
         deck: Optional[List[str]] = None,
         opponent_deck: Optional[List[str]] = None,
+        # Simulation overrides (applied to every pairing in the batch)
+        match_duration_ticks: Optional[int] = None,
+        overtime_ticks: Optional[int] = None,
+        elixir_regen_rate: Optional[float] = None,
     ) -> List[MatchResult]:
         """Play a batch of head-to-head matchups across the worker pool.
 
@@ -974,6 +1008,9 @@ class ParallelRunner:
             seed: Base seed; each pairing derives its own from this.
             deck: Deck for the first agent of each pairing.
             opponent_deck: Deck for the second agent.
+            match_duration_ticks: Override regulation length in ticks.
+            overtime_ticks: Override overtime duration in ticks.
+            elixir_regen_rate: Override elixir regen per tick (None → default).
 
         Returns:
             One MatchResult per pairing, in the order given.
@@ -995,6 +1032,9 @@ class ParallelRunner:
                 seed + idx * 977,
                 deck,
                 opponent_deck,
+                match_duration_ticks,
+                overtime_ticks,
+                elixir_regen_rate,
             )
             for idx, (a, b) in enumerate(pairings)
         ]

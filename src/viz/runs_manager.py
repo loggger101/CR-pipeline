@@ -173,25 +173,34 @@ class RunManager:
                     data = json.load(f)
                 return RunMetadata.from_dict(data)
 
-            # Load from config or metrics
-            config_path = run_dir / "config.yaml"
             metrics_path = run_dir / "metrics.json"
-
+            metrics: Dict[str, Any] = {}
             if metrics_path.exists():
                 with open(metrics_path) as f:
                     metrics = json.load(f)
-                best_fitness = metrics.get("best_fitness", 0.0)
-                actual_gens = metrics.get("actual_generations", 0)
-            else:
-                best_fitness = 0.0
-                actual_gens = 0
 
-            # Load config
-            config = {}
-            if config_path.exists():
-                import yaml
-                with open(config_path) as f:
-                    config = yaml.safe_load(f) or {}
+            # The trainer writes best_score/generation; older tools may have
+            # written best_fitness/actual_generations. Accept both.
+            best_fitness = float(
+                metrics.get("best_score", metrics.get("best_fitness", 0.0)) or 0.0
+            )
+            actual_gens = int(
+                metrics.get(
+                    "generation",
+                    metrics.get("actual_generations", 0),
+                )
+                or 0
+            )
+            max_gens = int(metrics.get("max_generations", 0) or 0)
+
+            # The trainer refreshes its root metrics.json every generation,
+            # so a run is complete only when it reached max_generations.
+            end_time: Optional[float] = None
+            if metrics_path.exists() and (max_gens == 0 or actual_gens >= max_gens):
+                try:
+                    end_time = metrics_path.stat().st_mtime
+                except OSError:
+                    end_time = None
 
             return RunMetadata(
                 run_id=run_dir.name,
@@ -199,11 +208,54 @@ class RunManager:
                 name=run_dir.name,
                 best_fitness=best_fitness,
                 actual_generations=actual_gens,
-                config=config,
+                max_generations=max_gens,
+                end_time=end_time,
+                config=self._load_run_config(run_dir, metrics),
             )
         except (IOError, json.JSONDecodeError) as e:
             logger.warning(f"Failed to load run metadata from {run_dir}: {e}")
             return None
+
+    @staticmethod
+    def _load_run_config(run_dir: Path, metrics: Dict[str, Any]) -> Dict[str, Any]:
+        """Load the training config recorded for a run.
+
+        The trainer writes ``config.json`` inside each generation folder; older
+        or external tools may use ``config.yaml``/``config.json`` at the run
+        root. Check those first, then fall back to the newest checkpoint's copy.
+        """
+        candidates = [
+            run_dir / "config.yaml",
+            run_dir / "config.json",
+        ]
+        gen_configs = sorted(run_dir.glob("gen_*/config.json"))
+        if gen_configs:
+            # Newest generation first; its config is the one in effect.
+            candidates.append(gen_configs[-1])
+
+        for path in candidates:
+            try:
+                if not path.exists():
+                    continue
+                with open(path) as f:
+                    if path.suffix == ".yaml":
+                        import yaml
+
+                        return yaml.safe_load(f) or {}
+                    return json.load(f)
+            except (IOError, json.JSONDecodeError):
+                continue
+        # Last resort: the run-level metrics carry a few config fields.
+        return {
+            k: v
+            for k, v in metrics.items()
+            if k in (
+                "tournament_mode",
+                "tournament_format",
+                "population_size",
+                "best_score_kind",
+            )
+        }
 
     def load_fitness_data(self, run_ids: Optional[List[str]] = None) -> Dict[str, Dict[str, List[float]]]:
         """Load fitness data for specified runs.

@@ -359,6 +359,48 @@ class TrainingTab(tk.Frame):
         self.progress = ttk.Progressbar(right, mode="determinate")
         self.progress.pack(fill="x", pady=(0, 8))
 
+        # -- champion spectators -------------------------------------------
+        # While the next generation evaluates in workers, show one recorded
+        # match between champions (posted as a "spectator" event after each
+        # completed generation) so training has visible action on screen.
+        self.spectate = tk.BooleanVar(value=True)
+        # Plain flag the worker thread reads: Tk variables must only be
+        # touched from the main thread, and a cross-thread .get() raises.
+        self._spectate_live = True
+        spectate_header = tk.Frame(right, background=PANEL)
+        spectate_header.pack(fill="x", pady=(0, 4))
+        ttk.Checkbutton(spectate_header,
+                        text="Spectate champions each generation",
+                        variable=self.spectate,
+                        command=self._sync_spectate_live).pack(side="left")
+        self.matchup = tk.StringVar(value="Waiting for a champion...")
+        tk.Label(spectate_header, textvariable=self.matchup, background=PANEL,
+                 foreground=MUTED, anchor="e").pack(
+            side="right", fill="x", expand=True)
+
+        self.spectator_arena = ArenaCanvas(right, width=600, height=230)
+        self.spectator_arena.pack(fill="x")
+
+        spectator_transport = tk.Frame(right, background=PANEL)
+        spectator_transport.pack(fill="x", pady=(4, 8))
+        self.spectate_pause = ttk.Button(spectator_transport, text="Pause",
+                                        state="disabled",
+                                        command=self._toggle_spectator_playback)
+        self.spectate_pause.pack(side="left")
+        self.speed_field = Field(spectator_transport, "Speed (fps)", 30,
+                                 width=5)
+        self.speed_field.pack(side="left", padx=(8, 0))
+        self.spectator_outcome = tk.StringVar(value="")
+        tk.Label(spectator_transport, textvariable=self.spectator_outcome,
+                 background=PANEL, foreground=MUTED, anchor="e").pack(
+            side="right", fill="x", expand=True)
+
+        self._spectator_recording = None
+        self._spectator_index = 0
+        self._spectator_playing = False
+        self._spectator_after_id = None
+        self._spectator_has_match = False
+
         self.chart = LineChart(right, title="Fitness by generation",
                                xlabel="generation", ylabel="fitness", height=3)
         self.chart.pack(fill="both", expand=True)
@@ -444,6 +486,12 @@ class TrainingTab(tk.Frame):
         self.hof_series = []
         self.chart.clear()
         self.log.clear()
+        self._stop_spectator_playback()
+        self._spectator_recording = None
+        self._spectator_index = 0
+        self._spectator_has_match = False
+        self.matchup.set("Waiting for a champion...")
+        self.spectator_outcome.set("")
         self.progress.configure(maximum=config.max_generations, value=0)
         if continuing:
             self.log.append(f"Continuing {Path(run_dir).name} for "
@@ -452,8 +500,13 @@ class TrainingTab(tk.Frame):
             self.log.append(f"Seeding population from "
                             f"{len(config.seed_agents)} agent(s).")
 
+        # Checked from a plain flag (not the Tk variable) so the worker
+        # thread never touches Tcl; the checkbox still works mid-run.
         started = self.app.start_job(
-            "training", lambda ctx: run_training(ctx, config), self)
+            "training",
+            lambda ctx: run_training(ctx, config,
+                                     spectate_enabled=lambda: self._spectate_live),
+            self)
         if started:
             self.start_button.configure(state="disabled")
             self.stop_button.configure(state="normal")
@@ -468,6 +521,8 @@ class TrainingTab(tk.Frame):
     def handle_event(self, event) -> None:
         if event.kind == "progress":
             self._on_generation(event.payload)
+        elif event.kind == "spectator":
+            self._on_spectator(event.payload)
         elif event.kind == "log":
             self.log.append(event.payload)
         elif event.kind == "done":
@@ -537,6 +592,85 @@ class TrainingTab(tk.Frame):
     def _reset_buttons(self) -> None:
         self.start_button.configure(state="normal")
         self.stop_button.configure(state="disabled")
+
+    def _sync_spectate_live(self) -> None:
+        """Copy the checkbox into a plain flag; workers never touch Tk."""
+        self._spectate_live = bool(self.spectate.get())
+
+    # -- spectator playback --------------------------------------------------
+
+    def _on_spectator(self, payload: dict) -> None:
+        """A new champion match arrived; play it while the next generation runs."""
+        recording = (payload.get("recording")
+                     if isinstance(payload, dict) else None)
+        if recording is None or not getattr(recording, "frames", None):
+            return
+        self.matchup.set(payload.get("matchup") or "champions")
+        was_playing = self._spectator_playing
+        self._stop_spectator_playback()
+        self.spectator_outcome.set("")
+        self._spectator_recording = recording
+        self._spectator_index = 0
+        self._show_spectator_frame(0)
+        self.spectate_pause.configure(state="normal")
+        # The first match plays on arrival; afterwards only if the viewer is
+        # already playing, so a deliberate pause survives new generations.
+        if was_playing or not self._spectator_has_match:
+            self._spectator_has_match = True
+            self._play_spectator()
+
+    def _toggle_spectator_playback(self) -> None:
+        if self._spectator_recording is None:
+            return
+        if self._spectator_playing:
+            self._stop_spectator_playback()
+        else:
+            # Restart from the beginning once a match has been watched through;
+            # otherwise resume where the viewer paused.
+            if self._spectator_index >= len(self._spectator_recording):
+                self._spectator_index = 0
+            self._play_spectator()
+
+    def _play_spectator(self) -> None:
+        self._spectator_playing = True
+        self.spectate_pause.configure(text="Pause")
+        self._advance_spectator()
+
+    def _stop_spectator_playback(self) -> None:
+        self._spectator_playing = False
+        if self._spectator_after_id is not None:
+            self.after_cancel(self._spectator_after_id)
+            self._spectator_after_id = None
+        if getattr(self, "spectate_pause", None) is not None:
+            self.spectate_pause.configure(text="Play")
+
+    def _advance_spectator(self) -> None:
+        recording = self._spectator_recording
+        if not self._spectator_playing or recording is None:
+            return
+        if self._spectator_index >= len(recording):
+            self._stop_spectator_playback()
+            winner = getattr(recording, "winner", "")
+            reason = getattr(recording, "reason", "")
+            self.spectator_outcome.set(
+                f"{winner} wins by {reason}" if winner not in (None, "", "none")
+                else "match interrupted")
+            return
+        self._show_spectator_frame(self._spectator_index)
+        self._spectator_index += 1
+        try:
+            fps = max(2, min(120, int(self.speed_field.get())))
+        except ValueError:
+            fps = 30
+        # Only the callback this call schedules is pending: we are running as
+        # the previous one fired, and every pause path cancels it.
+        self._spectator_after_id = self.after(int(1000 / fps),
+                                              self._advance_spectator)
+
+    def _show_spectator_frame(self, index: int) -> None:
+        recording = self._spectator_recording
+        if recording and 0 <= index < len(recording):
+            self.spectator_arena.show(recording.frames[index])
 
 
 class WatchTab(tk.Frame):

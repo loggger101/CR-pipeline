@@ -294,15 +294,30 @@ class TestSimulationEngine:
         assert not king.is_active
         assert all(p.is_active for p in princesses)
 
-    def test_king_activates_when_damaged(self):
-        """Damaging the king wakes it up."""
+    def test_small_damage_keeps_the_king_asleep(self):
+        """Real game: the king only wakes after losing a quarter of its max HP.
+        A single early spell hit must not wake it -- that is why spiking the
+        king with Lightning works in Clash Royale."""
         engine = SimulationEngine(seed=42)
         engine.reset()
 
         king = next(t for t in engine.opponent_towers if t.is_king)
         assert not king.is_active
 
+        # 100 damage is well under the 25% threshold (king max HP ~4008).
         engine._damage_unit(king, 100, "player")
+
+        assert not king.is_active
+        assert king.is_alive
+
+    def test_king_activates_at_the_quarter_hp_threshold(self):
+        engine = SimulationEngine(seed=42)
+        engine.reset()
+
+        king = next(t for t in engine.opponent_towers if t.is_king)
+        threshold = king.max_hp * (1 - 0.75) + 1  # just past 25% lost
+
+        engine._damage_unit(king, threshold, "player")
 
         assert king.is_active
         assert king.is_alive
@@ -350,26 +365,29 @@ class TestSimulationEngine:
         # Engine should handle opponent's random actions
         assert not engine.terminated or engine.tick > 0
 
-    def test_card_cooldown(self):
-        """Test card cooldown mechanics."""
+    def test_playing_a_card_cycles_its_slot_without_lockout(self):
+        """Real game: there is no per-slot deploy lockout. Playing a card pays
+        elixir and cycles that slot to the next deck card; the new card can be
+        played immediately if it is affordable."""
         engine = SimulationEngine(seed=42)
         state = engine.reset()
 
-        # Deploy a card
-        initial_cooldowns = list(engine.player_cooldowns)
+        first_card = engine.player_hand[0]
+        next_in_queue = engine.player_deck_queue[0]
+
         action = Action.play_card(card_idx=0, target_col=3.0, target_row=4.0)
         engine.step(action)
 
-        # Cooldown should be set
-        assert engine.player_cooldowns[0] > 0
+        # The slot was refilled from the deck queue (fixed rotation).
+        assert engine.player_hand[0] == next_in_queue
+        # No lockout: the slot is free to play again immediately.
+        assert engine.player_cooldowns[0] <= 0
 
-        # Try deploying the same card again (should fail due to cooldown)
+        # And the freshly cycled card can be played immediately -- elixir is
+        # the only gate, never a slot lockout.
         action2 = Action.play_card(card_idx=0, target_col=3.0, target_row=4.0)
-        result = engine.step(action2)
-
-        # Unit count should not increase (cooldown prevents deployment)
-        knight_count_before = sum(1 for u in engine.player_units
-                                  if u.unit_type == "knight" and u.is_alive)
+        engine.step(action2)
+        assert engine.player_cooldowns[0] <= 0
 
     def test_aoe_spells(self):
         """Test area-of-effect spell damage."""

@@ -21,6 +21,7 @@ from __future__ import annotations
 
 import json
 import logging
+import math
 import os
 import time
 from dataclasses import dataclass, field
@@ -34,6 +35,7 @@ import yaml
 from ..models import (
     Population, AgentRecord, EvolutionStrategy, EvolutionConfig,
 )
+from ..config import SimulationConfig
 from ..env.sim import (
     ParallelRunner, MatchResult, CARD_DEFS, default_worker_count,
 )
@@ -175,7 +177,8 @@ class TrainingConfig:
     tournament_elite_fraction: float = 0.1
     tournament_rounds: Optional[int] = None   # None -> ceil(log2(entrants))
     hall_of_fame_size: int = 4
-    # Monitoring
+    # Simulation config (overrides engine defaults via sim_game.yaml)
+    sim_config_path: Optional[str] = None   # Path to sim_game.yaml; None → engine defaults
     monitor_resources: bool = False
     monitor_sample_interval: float = 1.0
     monitor_output_dir: str = "runs/monitoring"
@@ -188,6 +191,12 @@ class TrainingConfig:
     # Data collection
     collect_matches: bool = False
     match_output_dir: str = "runs/matches"
+    # Experiment tracking (MLflow-style). Off by default; when enabled, each
+    # generation's metrics are logged to a run record under
+    # experiment_tracking_dir, which `crp experiments` and tracker reports read.
+    enable_experiment_tracking: bool = False
+    experiment_name: str = ""
+    experiment_tracking_dir: str = "experiment_tracking"
 
     def to_dict(self) -> dict:
         """Convert to dictionary."""
@@ -242,6 +251,12 @@ class TrainingConfig:
             "tournament_format": self.tournament_format,
             "tournament_matches": self.tournament_matches,
             "tournament_elite_fraction": self.tournament_elite_fraction,
+            # Simulation config override
+            "sim_config_path": self.sim_config_path,
+            # Experiment tracking
+            "enable_experiment_tracking": self.enable_experiment_tracking,
+            "experiment_name": self.experiment_name,
+            "experiment_tracking_dir": self.experiment_tracking_dir,
         }
 
     @classmethod
@@ -334,6 +349,18 @@ class EvolutionTrainer:
             )
             logger.info("Tournament mode enabled")
 
+        # Simulation config (allows tuning engine params via sim_game.yaml)
+        self._sim_config: Optional[SimulationConfig] = None
+        if config.sim_config_path is not None:
+            try:
+                self._sim_config = SimulationConfig.from_file(config.sim_config_path)
+                logger.info(f"Loaded simulation config: {self._sim_config.summary()}")
+            except FileNotFoundError as exc:
+                logger.warning(
+                    f"sim_game.yaml not found at {config.sim_config_path}: "
+                    f"{exc}. Using engine defaults."
+                )
+
         # Training state
         self.generation = 0
         self.best_fitness = -float('inf')
@@ -390,6 +417,35 @@ class EvolutionTrainer:
         if config.enable_registry:
             self.registry = ModelRegistry(config.registry_dir)
             logger.info("Model registry enabled")
+
+        # Initialize experiment tracking. Observability only: any failure here
+        # is logged and swallowed so it can never break a training run.
+        self.experiment_tracker = None
+        self._tracked_run_id: Optional[str] = None
+        if config.enable_experiment_tracking:
+            try:
+                from .experiment_tracking import ExperimentTracker
+
+                self.experiment_tracker = ExperimentTracker(
+                    config.experiment_tracking_dir)
+                run_name = Path(self.runs_dir).name or "training"
+                experiment = self.experiment_tracker.create_experiment(
+                    name=config.experiment_name or f"training_{run_name}",
+                    description=f"Training run written to {self.runs_dir}",
+                    tags=["training",
+                          "tournament" if self.tournament_mode else "scripted"],
+                )
+                tracked = self.experiment_tracker.start_run(
+                    experiment.experiment_id,
+                    name=run_name,
+                    params=self.config.to_dict(),
+                    tags=[f"seed_{config.seed}"],
+                )
+                self._tracked_run_id = tracked.run_id
+                logger.info("Experiment tracking enabled: %s", tracked.run_id)
+            except Exception as exc:
+                logger.warning("Could not start experiment tracking: %s", exc)
+                self.experiment_tracker = None
 
         # Initialize match collector
         self.match_collector = None
@@ -529,6 +585,7 @@ class EvolutionTrainer:
             # it is still going.
             self._emit_progress(gen, fitnesses, results)
             self._save_run_summary(gen)
+            self._track_generation(gen, fitnesses)
 
             # 5. Check for phase transition
             if self.config.curriculum_learning:
@@ -667,6 +724,13 @@ class EvolutionTrainer:
             })
             logger.info(f"Alert history saved ({len(alerts)} final alerts)")
 
+        # Close out experiment tracking with an honest status: a run that did
+        # not reach max_generations was stopped or early-stopped, not completed.
+        self._finish_tracking(
+            "completed" if self.generation >= self.config.max_generations
+            else "stopped"
+        )
+
         # Shutdown tournament evaluator if active
         if self.tournament_evaluator is not None:
             self.tournament_evaluator.shutdown()
@@ -789,6 +853,32 @@ class EvolutionTrainer:
         except OSError:
             logger.warning("Could not write run summary to %s", self.runs_dir)
 
+    def _track_generation(self, gen: int, fitnesses: List[float]) -> None:
+        """Log this generation's metrics to the experiment tracker, if active."""
+        if not self._tracked_run_id or self.experiment_tracker is None:
+            return
+        best_value = self.best_fitness if math.isfinite(self.best_fitness) else 0.0
+        mean_fit = float(np.mean(fitnesses)) if fitnesses else 0.0
+        try:
+            self.experiment_tracker.log_metrics_batch(
+                self._tracked_run_id,
+                {"best_fitness": best_value, "mean_fitness": mean_fit},
+                step=gen + 1,
+            )
+        except Exception as exc:
+            logger.warning("Experiment tracking log failed (ignored): %s", exc)
+
+    def _finish_tracking(self, status: str = "completed") -> None:
+        """End the tracked run with a final status and artifact reference."""
+        if not self._tracked_run_id or self.experiment_tracker is None:
+            return
+        try:
+            self.experiment_tracker.add_artifact(
+                self._tracked_run_id, str(self.runs_dir))
+            self.experiment_tracker.end_run(self._tracked_run_id, status=status)
+        except Exception as exc:
+            logger.warning("Could not finish experiment tracking (ignored): %s", exc)
+
     def _emit_progress(self, gen: int, fitnesses: List[float],
                        results: List[MatchResult]) -> None:
         """Hand a snapshot of this generation to ``on_generation``, if set.
@@ -900,17 +990,31 @@ class EvolutionTrainer:
             return
 
         champion_idx = max(range(len(results)), key=lambda i: results[i].fitness)
+        new_genome = np.array(weights[champion_idx], copy=True)
         self.hall_of_fame.append((
-            np.array(weights[champion_idx], copy=True),
+            new_genome,
             {"id": f"hof_gen{generation}",
              "generation": generation,
              "fitness": results[champion_idx].fitness,
              "elo": results[champion_idx].metadata.get("elo", 1500.0)},
         ))
-        # Keep the most recent champions: older ones stop being informative
-        # opponents once the population has moved past them.
+        # Evict the incumbent most similar to the newcomer rather than blindly
+        # dropping the oldest: a diverse archive of reference opponents resists
+        # cycling better -- the population can outgrow recent champions while
+        # still losing to older, distinct ones. If every incumbent is far from
+        # the newcomer this still removes the least-distinct one.
         if len(self.hall_of_fame) > self.config.hall_of_fame_size:
-            self.hall_of_fame = self.hall_of_fame[-self.config.hall_of_fame_size:]
+            incumbents = self.hall_of_fame[:-1]
+            new_flat = np.asarray(new_genome).ravel()
+            drop_idx = min(
+                range(len(incumbents)),
+                key=lambda i: float(np.linalg.norm(
+                    np.asarray(incumbents[i][0]).ravel() - new_flat)),
+            ) if incumbents else 0
+            self.hall_of_fame = (
+                [entry for i, entry in enumerate(incumbents) if i != drop_idx]
+                + [self.hall_of_fame[-1]]
+            )
 
     def _evaluate_against_scripted(self, weights: List[np.ndarray],
                                    generation: int = 0) -> List[MatchResult]:
@@ -940,11 +1044,22 @@ class EvolutionTrainer:
 
         for i in range(0, len(weights), batch_size):
             batch = weights[i:i + batch_size]
+            # Extract simulation overrides from loaded config when present
+            sim_kwargs: Dict[str, Any] = {}
+            if self._sim_config is not None:
+                for k in ("match_duration_ticks", "overtime_ticks"):
+                    val = getattr(self._sim_config, k, None)
+                    if val is not None:
+                        sim_kwargs[k] = val
+                if self._sim_config.elixir_regen_rate is not None:
+                    sim_kwargs["elixir_regen_rate"] = self._sim_config.elixir_regen_rate
+
             batch_results = self.runner.evaluate_population(
                 population_weights=batch,
                 matches_per_agent=self.config.matches_per_agent,
                 opponent_type=self.config.opponent_type,
                 seed=generation_seed,
+                **sim_kwargs,
             )
             results.extend(batch_results)
 

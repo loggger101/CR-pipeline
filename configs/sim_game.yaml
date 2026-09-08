@@ -1,8 +1,9 @@
-# Simulation Game Configuration
-# Defines arena layout, card balance, and game rules for the simulation engine.
+# Simulation Game Configuration — ACTIVE CONFIG
+# Reads by SimulationConfig.from_file() at training init. Overrides engine
+# defaults when any field differs from the built-in values.
+# No file needed for most use-cases (engine defaults apply).
 #
-# This config is validated against the SimulationConfig schema.
-# Most fields have sensible defaults.
+# To override: create a partial YAML with only the fields you want to change.
 
 # ── Arena Layout ─────────────────────────────────────────────────────────────
 arena:
@@ -74,15 +75,18 @@ towers:
 # Timebase: SimulationEngine.TICKS_PER_SECOND = 10, so one tick is 0.1s.
 # Card stats are authored in seconds (attack_speed) and tiles-per-second
 # (move_speed) and are converted through that constant.
+# NOTE: SimulationConfig.from_file reads the keys below under game_rules.
+# `overtime_ticks` (not `overtime_duration_ticks`) is the key it looks for;
+# the legacy name is also accepted.
 game_rules:
   match_duration_ticks: 1800   # 180s regulation, matching a real match
-  overtime_duration_ticks: 120 # +12s overtime
+  overtime_ticks: 600          # up to 60s sudden-death OT (first tower wins)
   elixir_max: 10               # Maximum elixir
-  # 1 elixir per 2.8s at 10 ticks/s, the real single-elixir rate. The engine
-  # uses this value when elixir_regen_rate is not passed explicitly.
+  # 1 elixir per 2.8s at 10 ticks/s, the real single-elixir rate.
   elixir_regen_rate: 0.0357
-  elixir_double_overtime: true # Double elixir in overtime
-  deployment_cooldown: 3       # Ticks a hand slot is locked after a play
+  double_elixir_overtime: true # Double elixir in overtime (real rule)
+  # Clash Royale has no per-slot deploy lockout; plays are gated only by
+  # elixir and the deck cycle, so there is nothing to configure here.
   # Matches are scored on crowns: 1 per princess tower, 3 for the king.
   # Destroying the king ends the match immediately. If crowns are level when
   # regulation ends the match goes to overtime; a crown lead ends it there.

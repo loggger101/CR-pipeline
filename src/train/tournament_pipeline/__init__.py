@@ -12,8 +12,6 @@ from .tournament_collector import (
     TournamentCollector,
     TournamentMatchData,
     TournamentCollectorConfig,
-)
-from .tournament_dataset import (
     TournamentDataset,
     TournamentDatasetVersion,
 )

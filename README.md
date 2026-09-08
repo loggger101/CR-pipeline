@@ -63,14 +63,14 @@ CR-Pipeline/
 │   │   │   └── action_mapper.py      # Output → in-game actions
 │   │   └── sim/                  # Low-fidelity simulation engine
 │   │       ├── engine.py             # Core game loop
-│   │       ├── entities.py           # 30+ cards, towers, units
+│   │       ├── entities.py           # 126+ cards at Level 11 stats, towers, units
 │   │       ├── actions.py            # Discrete action space
 │   │       ├── state.py              # Game state representation
 │   │       ├── rendering.py          # Arena visualization
 │   │       └── parallel_runner.py    # Multi-process parallelism
 │   ├── models/                   # Neural networks & evolution
 │   │   ├── policy.py               # ★ The evolved policy: features + NumPy MLP
-│   │   ├── architecture.py         # CNN+LSTM, CNN+MLP, CNN+ResNet, CNN+Transformer
+│   │   ├── architecture.py         # 9 Torch architectures: CNN+LSTM/MLP/ResNet/Transformer/GRU + variants
 │   │   ├── agent.py                # Agent wrapper (Torch net built lazily)
 │   │   ├── population.py           # Population management & fitness tracking
 │   │   ├── evolution.py            # GA operators (selection, crossover, mutation)
@@ -83,9 +83,18 @@ CR-Pipeline/
 │   │   ├── hyperparams.py          # Config management with phase presets
 │   │   ├── hpo.py                  # Hyperparameter optimization
 │   │   ├── experiment_tracking.py  # MLflow-like experiment tracking
-│   │   └── pipeline.py             # Pipeline orchestration with DAG
+│   │   ├── pipeline.py             # Pipeline orchestration with DAG
+│   │   ├── monitoring/            # Resource monitoring, bottleneck detection
+│   │   │   ├── metrics_collector.py
+│   │   │   ├── resource_monitor.py
+│   │   │   └── bottleneck_detector.py
+│   │   ├── data_pipeline/         # Match collection & dataset building
+│   │   │   ├── match_collector.py
+│   │   │   └── dataset.py
+│   │   └── tournament_pipeline/
+│   │       └── tournament_collector.py  # Tournament result storage
 │   ├── viz/                      # Visualization & reporting
-│   │   ├── dashboard.py            # Advanced Streamlit dashboard (6 tabs)
+│   │   ├── dashboard.py            # Advanced Streamlit dashboard (8 tabs)
 │   │   ├── metrics.py              # Advanced metrics (growth, acceleration)
 │   │   ├── runs_manager.py         # Run discovery, comparison, stats
 │   │   ├── tournament_viz.py       # ELO, brackets, H2H charts
@@ -101,12 +110,18 @@ CR-Pipeline/
 │   │   └── chart.py                # Embedded matplotlib chart
 │   ├── deploy/                   # Model export & deployment
 │   │   └── export.py              # ONNX, TorchScript, NumPy, JSON export
+│   ├── alerting/                 # Training event alerts (convergence, bottleneck, milestones)
+│   │   └── __init__.py            # AlertManager, AlertRule, channels
 │   ├── config/                   # Configuration system
 │   │   ├── validation.py          # Schema-based validation & templating
+│   │   ├── generator/             # Config template generation
 │   │   └── __init__.py            # Package exports
-│   └── data/                     # Data augmentation
-│       ├── augmentation.py        # Deck, strategy, condition augmentation
-│       └── __init__.py            # Package exports
+│   ├── data/                     # Data augmentation
+│   │   ├── augmentation.py        # Deck, strategy, condition augmentation
+│   │   └── __init__.py            # Package exports
+│   ├── registry/                 # Model versioning registry
+│   │   └── __init__.py            # ModelRegistry, ModelStage
+│   └── serialization.py          # Centralized checkpoint loading (torch.load with weights_only=False)
 ├── configs/                      # YAML configuration files
 │   ├── evolution.yaml            # Evolution hyperparameters
 │   ├── sim_game.yaml             # Simulation engine config
@@ -116,14 +131,14 @@ CR-Pipeline/
 │   └── build_exe.py              # Build script
 ├── scripts/                      # Entry points
 │   ├── crp_gui.py                # Desktop app launcher
-│   ├── crp.py                    # Unified CLI (11 commands)
+│   ├── crp.py                    # Unified CLI (12 commands)
 │   ├── train_sim.py              # Simulation training
 │   ├── train_self_play.py        # Self-play evolution
 │   ├── train_tournament.py       # Tournament evaluation
 │   ├── play_live.py              # Live-game agent
 │   ├── launch_dashboard.py       # Streamlit dashboard
 │   └── evaluate.py               # Agent evaluation
-├── tests/                        # Test suite (279 tests)
+├── tests/                        # Test suite (~430 test functions across 19 files)
 │   ├── test_sim_engine.py        # Engine tests
 │   ├── test_sim_regressions.py   # ★ Guards previously-silent engine defects
 │   ├── test_training_signal.py   # ★ Guards that training actually learns
@@ -135,14 +150,15 @@ CR-Pipeline/
 │   ├── test_advanced_metrics.py  # Metrics tests
 │   └── test_integration.py       # End-to-end integration tests
 ├── assets/                       # Static assets
-│   ├── card_data.json            # 97+ card definitions (Level 11 stats)
+│   ├── card_data.json            # Card data JSON (43 entries; full registry built in entities.py)
 │   └── maps/                     # Arena layouts
 ├── runs/                         # Training outputs (generated)
 │   ├── <run_id>/                 # Per-run directory
-│   │   ├── metrics.json          # Training metrics
+│   │   ├── metrics.json          # Training metrics (refreshed every generation)
 │   │   ├── fitness_history.json  # Per-generation fitness
-│   │   ├── config.yaml           # Run configuration
-│   │   └── checkpoints/          # Checkpoint snapshots
+│   │   ├── elo_history.json      # ELO progression (tournament mode)
+│   │   ├── gen_XXXX/             # Checkpoints: population.pt, trainer_state.pt, config.json
+│   │   └── best/best_agent.pt    # Best agent genome
 │   └── best/                     # Best agent snapshot
 ├── reports/                      # Generated reports
 ├── requirements.txt              # Python dependencies
@@ -203,7 +219,7 @@ python scripts/crp_gui.py
 
 | Tab | What it does |
 |---|---|
-| **Train** | Set population, generations, tournament format, seed and workers. Start/stop a run and watch generation, best/mean fitness, champion ELO and record update live on a chart. |
+| **Train** | Set population, generations, tournament format, seed and workers. Start/stop a run and watch generation, best/mean fitness, champion ELO and record update live on a chart — plus a spectator arena that plays one match between champions after each completed generation (play/pause + speed; toggle per-generation). |
 | **Watch** | Load an agent and watch it play a match on the arena — towers, troops, elixir and crowns — with play/pause, scrubbing and a speed control. |
 | **Runs** | Every past run with its generation count and best score. Select two or more to compare their fitness curves. |
 | **Agents** | Load a saved agent and play it against all five scripted baselines, or head-to-head against a second agent. |
@@ -292,35 +308,37 @@ using the Python already installed on the machine.
 ### Using the CLI (Recommended)
 
 ```bash
-# Train agents in simulation
-crp train --max-gens 100 --population-size 200 --workers 8
+# Train agents by tournament self-play (the default; scripted opponents via --no-tournament)
+# --experiments logs the run to the experiment tracker for `crp experiments`
+crp train --max-gens 100 --population-size 200 --workers 8 --experiments
 
-# Run tournament evaluation on top agents
-crp tournament --format round_robin --matches 4 --run-dir runs
+# Run tournament evaluation on a saved population
+crp tournament --population runs/run_123/gen_0030/population.pt --format round_robin --matches 4
 
-# Run hyperparameter optimization
-crp hpo --optimizer bayesian --trials 30 --base-run run_123
+# Hyperparameter optimization: each trial is a short real training run
+# (budget capped by --pop-size / --gens), scored by best fitness reached
+crp hpo --optimizer bayesian --trials 10
 
 # Launch the advanced visualization dashboard
 crp dashboard --runs-dir runs
 
-# Generate a training report
-crp report --run-dir runs/run_123 --type training
+# Generate a training report for a run (run id under runs/ or a full path)
+crp report --experiment runs/run_123
 
 # Compare two training runs
-crp compare --runs run_123 run_456
+crp compare run_123 run_456
 
 # Export best model
-crp export --run-dir runs/run_123 --formats torch,onnx,numpy
+crp export --model runs/run_123/best/best_agent.pt --formats numpy,json,pickle
 
 # List all experiments
-crp experiments --list
+crp experiments list
 
 # Run architecture search
 crp search --generations 20 --population 20
 
-# Benchmark a model
-crp benchmark --model runs/run_123/best_agent.pt --input-shape 1,8,6,16
+# Benchmark the real policy inference path (BATCH,FEATURES; FEATURES is 64)
+crp benchmark --model runs/run_123/best/best_agent.pt --input-shape 1024,64
 ```
 
 ### Using Python Scripts Directly
@@ -566,6 +584,11 @@ in both directions.
 | **CNN+MLP** | Frames + state features | Two-stream → Concat(256) | Action logits | Fast training |
 | **CNN+ResNet** | Single frame [B,C,H,W] | ResBlocks → LSTM | Action heads | Deep feature extraction |
 | **CNN+Transformer** | Frame patches | CNN → Transformer → LSTM | Action logits | Global attention |
+| **CNN+GRU** | Frames | Conv → GRU(256) | Action logits | Lightweight temporal |
+| **CNN+ResNet-LSTM** | Single frame | ResBlocks → LSTM | Action heads | Deep features + sequence |
+| **CNN+Transformer-LSTM** | Frame patches | CNN → Transformer → LSTM | Action logits | Global attention + temporal |
+| **CNN+LSTM-Attention** | Frames | Conv → Attention → LSTM | Action logits | Focus on key game events |
+| **CNN-CNN-MLP** | Multi-frame stack | Dual conv streams → MLP | Action logits | Frame-diff dynamics |
 
 ### Genetic Algorithm Operators
 
@@ -579,6 +602,8 @@ in both directions.
 
 ### Training Phases (Curriculum Learning)
 
+*Configured but not yet the default path.* The current primary training mode is tournament-based evolution (`tournament_mode=True`). Curriculum phases are available via `TrainingConfig.phase_transitions` and activate automatically when `curriculum_learning=True`, using fitness variance thresholds to trigger transitions.
+
 | Phase | Description | Generations | Goal |
 |-------|-------------|-------------|------|
 | **Phase 1** | Random policy baseline | 10 | Verify pipeline works |
@@ -586,8 +611,6 @@ in both directions.
 | **Phase 3** | Evolution in full simulation | 100 | Learn deck synergy & timing |
 | **Phase 4** | Fine-tune on live game | 100 | Adapt to real-game noise |
 | **Phase 5** | Self-play competitive evolution | 200 | Push to competitive level |
-
-Automatic phase transitions occur when fitness variance drops below threshold.
 
 ---
 
@@ -618,20 +641,12 @@ Automatic phase transitions occur when fitness variance drops below threshold.
 ### Report Generation
 
 ```bash
-# HTML report with charts
-crp report --run-dir runs/run_123 --type training --format html
+# Training report for a run (HTML by default; --format markdown|json also works)
+crp report --experiment runs/run_123
+crp report --experiment run_123 --format json
 
-# Markdown report
-crp report --run-dir runs/run_123 --type training --format markdown
-
-# JSON metrics export
-crp report --run-dir runs/run_123 --type training --format json
-
-# Tournament report
-crp report --run-dir runs/run_123 --type tournament --format html
-
-# Compare two runs
-crp compare --runs run_123 run_456 --format html
+# Compare two runs (run ids under runs/, or full paths)
+crp compare run_123 run_456
 ```
 
 ---
@@ -714,24 +729,17 @@ augmented_deck = pipeline.augment_deck(original_deck)
 
 ```
 runs/
-├── run_<timestamp>_<name>/          # Per-run directory
-│   ├── metrics.json                 # Training metrics
-│   ├── fitness_history.json         # Per-generation fitness stats
-│   ├── config.yaml                  # Run configuration snapshot
-│   ├── checkpoints/                 # Checkpoint snapshots
-│   │   ├── gen_0010/
-│   │   │   ├── population.pt
-│   │   │   ├── fitness_history.json
-│   │   │   └── metadata.json
-│   │   └── gen_0020/
-│   ├── best_agent.pt                # Best agent weights
-│   ├── best_agent_metadata.json     # Best agent metadata
-│   ├── tournament_results.json      # Tournament evaluation results
-│   └── elo_history.json             # ELO rating progression
-├── run_<timestamp>_<name>2/        # Another run
-└── best/                            # Continuously updated best agent
-    ├── best_agent.pt                # Evolved policy genome
-    └── metadata.json
+├── run_<timestamp>/                 # Per-run directory
+│   ├── metrics.json                 # Run summary (refreshed every generation)
+│   ├── fitness_history.json         # Per-generation best/mean/median/min/std
+│   ├── elo_history.json             # Champion & field ELO progression (tournament mode)
+│   ├── training.log                 # Training log
+│   ├── gen_0010/                    # Checkpoint every checkpoint_interval generations
+│   │   ├── population.pt            # All agent genomes
+│   │   ├── trainer_state.pt         # Resume state: generation, hall of fame, ELO
+│   │   ├── config.json              # Config snapshot in effect at that point
+│   │   └── ...                      # fitness/diversity/evolution histories
+│   └── best/best_agent.pt           # Best agent genome
 
 reports/
 ├── training_report.html
@@ -892,7 +900,7 @@ pytest tests/test_integration.py -v
 pytest tests/ --cov=src --cov-report=html
 ```
 
-**Test coverage: 453 tests** across simulation engine, evolution strategies,
+**~430 test functions** (expanded with parametrized fixtures) across simulation engine, evolution strategies,
 tournament system, checkpoint/resume, run artifacts, desktop UI,
 visualization, and integration.
 
@@ -946,7 +954,7 @@ learned:
 - [x] Phase 13: Pipeline orchestration
 - [x] Phase 14: Data augmentation
 - [x] Phase 15: Configuration validation system
-- [x] Phase 16: CLI tool (11 commands)
+- [x] Phase 16: CLI tool (12 commands)
 - [x] Phase 17: Integration tests
 - [x] Phase 18: Docker containerization (`Dockerfile`)
 - [ ] Phase 19: Live-game interaction prototype
