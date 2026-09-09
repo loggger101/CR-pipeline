@@ -77,8 +77,15 @@ class WorkerConfig:
         deck: Card deck to use.
         opponent_deck: Opponent card deck.
         match_duration_ticks: Length of each match.
-        overtime_ticks: Overtime duration.
-        elixir_regen_rate: Elixir regeneration rate.
+        overtime_ticks: Overtime duration. Must mirror the engine default --
+            re-hardcoding a number here is how this field drifted to 120 ticks
+            (pre-Round-8) while the rest of the pipeline moved to real-CR
+            sudden death, so tournaments silently ranked agents in a different
+            game than scripted training played.
+        elixir_regen_rate: Elixir per tick; ``None`` defers to the engine's
+            real-game rate (1 per 2.8 s). The old default of 0.3/tick was ~8x
+            that -- the same stale value Round 8 removed from the sim templates
+            but never propagated here.
         opponent_type: Type of opponent ("random", "greedy", "balanced", 
                        "aggressive", "defensive", "self_play").
         self_play_weights: Weights for self-play opponent.
@@ -88,9 +95,9 @@ class WorkerConfig:
     match_count: int = 5
     deck: Optional[List[str]] = None
     opponent_deck: Optional[List[str]] = None
-    match_duration_ticks: int = 1800
-    overtime_ticks: int = 120
-    elixir_regen_rate: float = 0.3
+    match_duration_ticks: int = 1800   # == engine default (180 s regulation)
+    overtime_ticks: int = 600          # == engine default (sudden death, up to 60 s)
+    elixir_regen_rate: Optional[float] = None   # None -> engine's real-game rate
     opponent_type: str = "random"
     self_play_weights: Optional[np.ndarray] = None
     use_training_decks: bool = True
@@ -569,7 +576,7 @@ def _run_head_to_head(
                 match_duration_ticks=(match_duration_ticks
                                      if match_duration_ticks is not None
                                      else 1800),
-                overtime_ticks=overtime_ticks if overtime_ticks is not None else 120,
+                overtime_ticks=overtime_ticks if overtime_ticks is not None else 600,
                 elixir_regen_rate=elixir_regen_rate,
                 seed=seed_base + i * 100,
                 record_replay=False,
