@@ -805,6 +805,46 @@ class EvolutionTrainer:
         """Stop the training loop."""
         self.running = False
 
+    # Match-duration presets in ticks (10 Hz). Kept as one mapping because the
+    # scripted and tournament evaluation paths must play the *same* game for a
+    # given setting -- previously each path carried its own copy of this table
+    # (the tournament path had none at all), so ``match_duration`` was dead in
+    # the default training mode: every real run played full-length matches no
+    # matter what the config or UI said.
+    MATCH_DURATION_TICKS = {
+        "full": 1800,      # 180 s regulation (real CR)
+        "short": 600,      # 60 s -- smoke tests and fast sweeps
+        "overtime": 2400,  # 240 s -- long-horizon play
+    }
+
+    def _sim_overrides(self) -> Dict[str, Any]:
+        """Simulation overrides for match evaluation.
+
+        Priority: an explicit ``--sim-config`` file wins (it is the user's
+        deliberate per-field choice); otherwise the named preset from
+        ``match_duration`` applies; engine defaults fill everything else.
+        Returns a dict of keyword arguments accepted by both
+        ``ParallelRunner.evaluate_population`` and ``run_pairings``.
+        """
+        overrides: Dict[str, Any] = {}
+        if self._sim_config is not None:
+            # An explicit --sim-config file wins over the named preset: per-field
+            # values are a deliberate choice and must not be clobbered.
+            for k in ("match_duration_ticks", "overtime_ticks"):
+                val = getattr(self._sim_config, k, None)
+                if val is not None:
+                    overrides[k] = val
+            if self._sim_config.elixir_regen_rate is not None:
+                overrides["elixir_regen_rate"] = self._sim_config.elixir_regen_rate
+        else:
+            duration = self.MATCH_DURATION_TICKS.get(
+                self.config.match_duration, 1800)
+            if duration != 1800 or self.config.match_duration != "full":
+                # Only pass the override when it actually differs from the
+                # engine default, so a plain full-length run stays bit-identical.
+                overrides["match_duration_ticks"] = duration
+        return overrides
+
     def _evaluate_population(self, weights: List[np.ndarray],
                              generation: int = 0) -> List[MatchResult]:
         """Score the population for this generation.
@@ -861,6 +901,7 @@ class EvolutionTrainer:
             rounds=self.config.tournament_rounds,
             generation=generation,
             initial_elo=self.elo_ratings,
+            sim_kwargs=self._sim_overrides(),
         )
 
         self.last_tournament = result
@@ -1094,13 +1135,9 @@ class EvolutionTrainer:
         advances per generation, so the population is not repeatedly graded on
         one fixed set of matches.
         """
-        # Determine match duration
-        duration_map = {
-            "full": 1800,
-            "short": 600,
-            "overtime": 2400,
-        }
-        duration = duration_map.get(self.config.match_duration, 1800)
+        # Determine match duration -- shared with the tournament path via
+        # _sim_overrides so both modes play the same game for a given setting.
+        sim_kwargs = self._sim_overrides()
 
         # Evaluate in batches if needed
         results = []
@@ -1117,15 +1154,6 @@ class EvolutionTrainer:
             # misread its own weights inside the worker.
             from ..models.policy import compile_genome
             batch = [compile_genome(w, self.policy_spec) for w in weights[i:i + batch_size]]
-            # Extract simulation overrides from loaded config when present
-            sim_kwargs: Dict[str, Any] = {}
-            if self._sim_config is not None:
-                for k in ("match_duration_ticks", "overtime_ticks"):
-                    val = getattr(self._sim_config, k, None)
-                    if val is not None:
-                        sim_kwargs[k] = val
-                if self._sim_config.elixir_regen_rate is not None:
-                    sim_kwargs["elixir_regen_rate"] = self._sim_config.elixir_regen_rate
 
             batch_results = self.runner.evaluate_population(
                 population_weights=batch,

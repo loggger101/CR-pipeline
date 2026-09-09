@@ -335,6 +335,64 @@ class TestTournamentTraining:
                 assert trainer.best_genome is not None
 
 
+class TestMatchDurationWiring:
+    """``match_duration`` must reach every evaluation path, not just some.
+
+    Regression for a real defect: the scripted path computed its duration map
+    and never used it, and the tournament path (the default training mode) had
+    no duration handling at all -- so ``crp train --match-duration short`` and
+    the UI's "short" option silently played full-length matches in every real
+    run. Both paths now share ``EvolutionTrainer._sim_overrides()``.
+    """
+
+    def _config(self, tmpdir, **overrides):
+        params = dict(
+            population_size=4, elite_count=1, max_generations=0,
+            num_workers=2, runs_dir=tmpdir, seed=3, checkpoint_interval=100,
+            curriculum_learning=False, diversity_preservation=False,
+            tournament_matches=2)
+        params.update(overrides)
+        return TrainingConfig(**params)
+
+    def test_preset_maps_to_ticks(self):
+        assert EvolutionTrainer.MATCH_DURATION_TICKS == {
+            "full": 1800, "short": 600, "overtime": 2400}
+
+    def test_sim_overrides_for_named_presets(self, tmp_path):
+        with EvolutionTrainer(self._config(str(tmp_path), match_duration="short")) as trainer:
+            assert trainer._sim_overrides() == {"match_duration_ticks": 600}
+        # The default ("full") must produce NO override at all -- a plain run
+        # stays bit-identical to engine defaults.
+        with EvolutionTrainer(self._config(str(tmp_path))) as trainer:
+            assert trainer._sim_overrides() == {}
+
+    def test_tournament_mode_plays_short_matches(self, tmp_path):
+        """The default training path must honour the setting end-to-end."""
+        import numpy as np
+        from src.models.policy import DEFAULT_POLICY_SPEC
+
+        with EvolutionTrainer(self._config(str(tmp_path), match_duration="short")) as trainer:
+            trainer.population.initialize(seed=3)
+            genomes = trainer.population.get_population_weights()
+            short_results = trainer._evaluate_population(genomes, generation=0)
+            assert all(r.wins + r.draws + r.losses > 0 for r in short_results)
+
+        with EvolutionTrainer(self._config(str(tmp_path), match_duration="full")) as trainer:
+            trainer.population.initialize(seed=3)  # identical starting field
+            genomes = trainer.population.get_population_weights()
+            full_results = trainer._evaluate_population(genomes, generation=1)
+
+        avg_short = float(np.mean([r.avg_duration for r in short_results]))
+        avg_full = float(np.mean([r.avg_duration for r in full_results]))
+        # Short matches cap at 600 + overtime (<= ~1250 ticks); with real-elixir
+        # play the average sits far below that, while full-length games run to
+        # regulation. Pre-fix both averages were identical (~full length).
+        assert avg_short < 800, f"short matches averaged {avg_short:.0f} ticks"
+        assert avg_full > avg_short + 200, (
+            f"'full' ({avg_full:.0f}) did not outlast 'short' "
+            f"({avg_short:.0f}): match_duration is still dead in tournament mode")
+
+
 class TestTrainingImprovesAbsolutely:
     """Guards against the population improving only relative to itself."""
 

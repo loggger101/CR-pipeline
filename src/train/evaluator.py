@@ -338,6 +338,7 @@ class TournamentRunner:
         rounds: Optional[int] = None,
         seed_offset: int = 0,
         initial_elo: Optional[Dict[str, float]] = None,
+        sim_kwargs: Optional[Dict[str, Any]] = None,
     ) -> TournamentResult:
         """Run a Swiss-system tournament.
 
@@ -397,6 +398,7 @@ class TournamentRunner:
                 weights_list=weights_list,
                 matches_per_pair=matches_per_pair,
                 seed=self.seed + seed_offset + round_idx * 10_007,
+                **(sim_kwargs or {}),
             )
 
             for (i, j), result in zip(pairings, results):
@@ -492,7 +494,8 @@ class TournamentRunner:
     def _play_round(self, contests: List[Tuple[str, str]],
                     index_of: Dict[str, int],
                     weights_list: List[np.ndarray],
-                    matches_per_pair: int, seed: int) -> List[Any]:
+                    matches_per_pair: int, seed: int,
+                    sim_kwargs: Optional[Dict[str, Any]] = None) -> List[Any]:
         """Play every matchup in one round across the worker pool.
 
         Matchups within a round are independent, so they go out as a single
@@ -501,6 +504,10 @@ class TournamentRunner:
         format except Swiss executing a whole generation on the calling
         thread. In the desktop app that thread is the training worker, so the
         Tk event loop was starved and Windows closed the window as hung.
+
+        ``sim_kwargs`` carries match-rule overrides (duration, overtime, elixir)
+        from the trainer's config; without them every format silently played
+        engine-default matches regardless of what the run asked for.
         """
         if not contests:
             return []
@@ -509,6 +516,7 @@ class TournamentRunner:
             weights_list=weights_list,
             matches_per_pair=matches_per_pair,
             seed=seed,
+            **(sim_kwargs or {}),
         )
 
     @staticmethod
@@ -540,6 +548,7 @@ class TournamentRunner:
         matches_per_pair: int = 4,
         seed_offset: int = 0,
         initial_elo: Optional[Dict[str, float]] = None,
+        sim_kwargs: Optional[Dict[str, Any]] = None,
     ) -> TournamentResult:
         """Run a round-robin tournament (all-vs-all).
 
@@ -576,6 +585,7 @@ class TournamentRunner:
             weights_list=weights_list,
             matches_per_pair=matches_per_pair,
             seed=self.seed + seed_offset,
+            **(sim_kwargs or {}),
         )
 
         for (i, j), result in zip(pairings, results):
@@ -592,6 +602,7 @@ class TournamentRunner:
         matches_per_pair: int = 4,
         seed_offset: int = 0,
         initial_elo: Optional[Dict[str, float]] = None,
+        sim_kwargs: Optional[Dict[str, Any]] = None,
     ) -> TournamentResult:
         """Run a single elimination tournament.
 
@@ -632,7 +643,8 @@ class TournamentRunner:
             contests, bye = self._split_byes(survivors)
             results = self._play_round(
                 contests, index_of, weights_list, matches_per_pair,
-                seed=self.seed + seed_offset + round_num * 1000)
+                seed=self.seed + seed_offset + round_num * 1000,
+                sim_kwargs=sim_kwargs)
 
             advancing = []
             for (aid1, aid2), result in zip(contests, results):
@@ -661,6 +673,7 @@ class TournamentRunner:
         matches_per_pair: int = 4,
         seed_offset: int = 0,
         initial_elo: Optional[Dict[str, float]] = None,
+        sim_kwargs: Optional[Dict[str, Any]] = None,
     ) -> TournamentResult:
         """Run a double elimination tournament.
 
@@ -705,7 +718,8 @@ class TournamentRunner:
             contests, bye = self._split_byes(entrants)
             results = self._play_round(
                 contests, index_of, weights_list, matches_per_pair,
-                seed=self.seed + seed_offset + round_num * 1000)
+                seed=self.seed + seed_offset + round_num * 1000,
+                sim_kwargs=sim_kwargs)
 
             advancing = []
             for (aid1, aid2), result in zip(contests, results):
@@ -737,7 +751,8 @@ class TournamentRunner:
             contests = [(winner_bracket[0], loser_bracket[0])]
             results = self._play_round(
                 contests, index_of, weights_list, matches_per_pair,
-                seed=self.seed + seed_offset + round_num * 1000)
+                seed=self.seed + seed_offset + round_num * 1000,
+                sim_kwargs=sim_kwargs)
             self._record_matchup(contests[0][0], contests[0][1], results[0],
                                  agent_stats, h2h_records, elo_ratings)
             bracket.rounds.append(contests)
@@ -760,6 +775,7 @@ class TournamentRunner:
         rounds: int = 3,
         seed_offset: int = 0,
         initial_elo: Optional[Dict[str, float]] = None,
+        sim_kwargs: Optional[Dict[str, Any]] = None,
     ) -> TournamentResult:
         """Run a league-style tournament with multiple rounds.
 
@@ -799,7 +815,8 @@ class TournamentRunner:
             # as one batch rather than one matchup at a time on this thread.
             results = self._play_round(
                 round_matches, index_of, weights_list, matches_per_pair,
-                seed=self.seed + seed_offset + round_num * 10000)
+                seed=self.seed + seed_offset + round_num * 10000,
+                sim_kwargs=sim_kwargs)
 
             for (aid1, aid2), result in zip(round_matches, results):
                 self._record_matchup(aid1, aid2, result, agent_stats,
@@ -848,40 +865,43 @@ class TournamentRunner:
         seed_offset: int = 0,
         rounds: Optional[int] = None,
         initial_elo: Optional[Dict[str, float]] = None,
+        sim_kwargs: Optional[Dict[str, Any]] = None,
     ) -> TournamentResult:
         """Run a tournament of the specified format.
 
         Args:
             agent_ids: List of agent identifiers.
-            weights_list: List of weight arrays.
+            weights_list: List of weight arrays corresponding to agent_ids.
             format: Tournament format to use. Swiss is the default because it
                 is the only one that scales to a full training population.
             matches_per_pair: Matches per matchup.
-            seed_offset: Offset for random seeds.
+            seed_offset: Seed offset for random seeds.
             rounds: Number of rounds (Swiss and league formats).
             initial_elo: Ratings carried in from previous generations.
+            sim_kwargs: Match-rule overrides forwarded to every pairing
+                (duration, overtime, elixir); see ``ParallelRunner.run_pairings``.
 
         Returns:
             TournamentResult with rankings and detailed stats.
         """
         if format == TournamentFormat.SWISS:
             return self.run_swiss(agent_ids, weights_list, matches_per_pair,
-                                  rounds, seed_offset, initial_elo)
+                                  rounds, seed_offset, initial_elo, sim_kwargs)
         if format == TournamentFormat.ROUND_ROBIN:
             return self.run_round_robin(agent_ids, weights_list, matches_per_pair,
-                                        seed_offset, initial_elo)
+                                        seed_offset, initial_elo, sim_kwargs)
         if format == TournamentFormat.SINGLE_ELIMINATION:
             return self.run_single_elimination(agent_ids, weights_list,
                                                matches_per_pair, seed_offset,
-                                               initial_elo)
+                                               initial_elo, sim_kwargs)
         if format == TournamentFormat.DOUBLE_ELIMINATION:
             return self.run_double_elimination(agent_ids, weights_list,
                                                matches_per_pair, seed_offset,
-                                               initial_elo)
+                                               initial_elo, sim_kwargs)
         if format == TournamentFormat.LEAGUE:
             return self.run_league(agent_ids, weights_list, matches_per_pair,
                                    rounds if rounds is not None else 3,
-                                   seed_offset, initial_elo)
+                                   seed_offset, initial_elo, sim_kwargs)
         raise ValueError(f"Unknown tournament format: {format}")
 
 
@@ -1071,6 +1091,7 @@ class FitnessEvaluator:
         rounds: Optional[int] = None,
         generation: int = 0,
         initial_elo: Optional[Dict[str, float]] = None,
+        sim_kwargs: Optional[Dict[str, Any]] = None,
     ) -> TournamentResult:
         """Run a tournament-style evaluation where agents play each other.
 
@@ -1101,6 +1122,7 @@ class FitnessEvaluator:
             seed_offset=seed,
             rounds=rounds,
             initial_elo=initial_elo,
+            sim_kwargs=sim_kwargs,
         )
         result.generation = generation
 

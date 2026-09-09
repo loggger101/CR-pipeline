@@ -181,6 +181,16 @@ The real signal was already in the data: hall-of-fame champions' ratings decline
 
 **Measured effect:** full suite 513 → **551 tests passing**; live smoke runs show champion refinement active every generation and best fitness rising across generations.
 
+### Round 10 — Match rules reach every evaluation path (v0.4)
+
+| Change | Before | After |
+|--------|--------|-------|
+| `match_duration` in tournament mode (the default training loop) | **Dead**: `_evaluate_by_tournament` never passed sim overrides, so all five formats played engine-default matches regardless of config or UI setting — every real run was full-length. | Shared `EvolutionTrainer._sim_overrides()` feeds the named preset (`full`=1800 / `short`=600 / `overtime`=2400 ticks) into `_evaluate_by_tournament` → both `run_tournament` dispatchers → all five formats → `run_pairings`. |
+| `match_duration` in scripted mode | **Dead too**: the duration map was computed and never used (only an explicit `--sim-config` file had effect). | Same shared helper; behaviour for sim-config runs unchanged. |
+| Override priority | — | Explicit `--sim-config` wins over the named preset (deliberate per-field choice); a plain full-length run passes **no** override at all, staying bit-identical to engine defaults. |
+
+Regression-tested end-to-end: `test_tournament_mode_plays_short_matches` evaluates an identical population under "short" and "full" through the real tournament path and asserts short matches average far fewer ticks (pre-fix both averages were identical).
+
 ---
 
 ## Known limitations & future work
