@@ -340,9 +340,12 @@ class TestMatchDurationWiring:
 
     Regression for a real defect: the scripted path computed its duration map
     and never used it, and the tournament path (the default training mode) had
-    no duration handling at all -- so ``crp train --match-duration short`` and
-    the UI's "short" option silently played full-length matches in every real
-    run. Both paths now share ``EvolutionTrainer._sim_overrides()``.
+    no duration handling at all -- so ``TrainingConfig(match_duration="short")``
+    (and the desktop UI's "Match length" option) silently played full-length
+    matches in every real run. Both paths now share
+    ``EvolutionTrainer._sim_overrides()``; there is deliberately no CLI flag for
+    it -- a named preset comes from config/UI, and per-field overrides come from
+    an explicit ``--sim-config`` file (which wins over the preset).
     """
 
     def _config(self, tmpdir, **overrides):
