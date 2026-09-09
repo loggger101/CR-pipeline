@@ -233,7 +233,12 @@ class TestEvolutionImproves:
         SE ~0.7), while drift-vs-drift nulls stayed within noise (|gap| <= 0.74,
         |t| < 1). A weaker guard by explicit decision, but it tests its actual
         intent -- that selection carries signal -- rather than hoping a particular
-        3-generation window draws well.
+        a 3-generation window draws well. Re-verified 2026-09 under real-CR match
+        defaults (WorkerConfig elixir_regen_rate None -> engine's ~1-per-2.8-s rate,
+        previously 0.3/tick): slower play lowers absolute fitness but tightens the
+        noise more -- measured gap +1.50/+1.15/+1.09 with pooled SE 0.44/0.47/0.30
+        across three init populations (margins 2.4..3.7x SE), so the unchanged
+        ``gap >= pooled_se`` assert holds with room to spare.
         """
         pop_size = 12
 

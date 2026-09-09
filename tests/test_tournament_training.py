@@ -377,7 +377,12 @@ class TestTrainingImprovesAbsolutely:
         # actual intent: the champion must not be *statistically* weaker than its ancestor. An
         # exact one-sided binomial (alpha=0.10) flags <=6 wins of 20 as a genuine regression while
         # tolerating noise-level draws -- a weaker guard by explicit decision, but still capable of
-        # catching real collapse (e.g. 5W/15L -> p~0.02 fails).
+        # catching real collapse (e.g. 5W/15L -> p~0.02 fails). Re-verified 2026-09 under
+        # real-CR match defaults: the head-to-head path previously fell back to a stale
+        # 120-tick overtime while everything else moved to sudden death (now aligned), and
+        # elixir regen defers to the engine's ~1-per-2.8-s rate instead of 0.3/tick --
+        # measured 12W/8L (p=0.87) for this test's seed and 10W/10L (p=0.59) on a second
+        # training seed, both comfortably inside the guard with no threshold change needed.
         decisive = wins + losses
         if decisive == 0:
             pytest.fail("champion-vs-ancestor produced no decisive matches")
