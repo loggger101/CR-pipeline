@@ -9,7 +9,7 @@ The evolved policy is now a four-layer tanh MLP (20,071 parameters by default)
 and every generation explicitly builds on the last via champion refinement,
 tempered selection, adaptive mutation and a diversity-collapse guard.
 
-Suite: **551 tests passing** across simulation engine, evolution strategies,
+Suite: **554 tests passing** across simulation engine, evolution strategies,
 tournament system, checkpoint/resume, run artifacts, desktop UI, pygame arena
 viewer, monitoring, and integration.
 
@@ -189,7 +189,9 @@ The real signal was already in the data: hall-of-fame champions' ratings decline
 | `match_duration` in scripted mode | **Dead too**: the duration map was computed and never used (only an explicit `--sim-config` file had effect). | Same shared helper; behaviour for sim-config runs unchanged. |
 | Override priority | — | Explicit `--sim-config` wins over the named preset (deliberate per-field choice); a plain full-length run passes **no** override at all, staying bit-identical to engine defaults. |
 
-Regression-tested end-to-end: `test_tournament_mode_plays_short_matches` evaluates an identical population under "short" and "full" through the real tournament path and asserts short matches average far fewer ticks (pre-fix both averages were identical).
+Regression-tested end-to-end: `test_tournament_mode_plays_short_matches` evaluates an identical population under "short" and "full" through the real tournament path and asserts short matches average far fewer ticks (pre-fix both averages were identical). Full suite 551 → **554 passed**.
+
+**First long run on the fixed pipeline:** `runs/longrun_20260909_0041` — population 64, Swiss, full-length matches at real elixir rate. Ran to generation 55 of 250 before **early stopping triggered cleanly** (patience exhausted: best ELO plateaued). Best fitness **1631.08 ELO @ gen 26** (`agent_58`), hall of fame reached 119 tracked agents, ~38 s/generation wall time on this box. The run directory is gitignored data; `best/best_agent.pt` + metadata are the durable artifacts. This answers "Where to pick up" item #1 with a real measurement: at pop-64/full-length, ELO climbs fast for ~25 generations then plateaus — longer runs need either larger populations or harder opponents before early stopping fires later.
 
 ---
 
@@ -211,7 +213,7 @@ Regression-tested end-to-end: `test_tournament_mode_plays_short_matches` evaluat
 
 ## Where to pick up
 
-1. **Longer tournament runs at larger populations** — the loop is stable and each generation now refines the champion; scaling is the next experiment (a multi-hour `crp train --max-gens 100+` run with ELO curves would be the first real proof of learning quality).
+1. **Longer tournament runs at larger populations** — first measurement in hand: pop-64 full-length (Round 10) climbed ELO fast for ~25 generations then plateaued into early stopping by gen 55/250. The next experiment is a larger population (`--population-size 200+`) so the field stays hard enough to keep improving before patience fires; watch champion-vs-hall-of-fame ELO, not raw fitness.
 2. **Checkpoint schema versioning** — add a `policy_version` field so old runs are rejected/migrated deliberately instead of by shape coincidence.
 3. **Hall of fame diversity** — sampling across the whole run rather than a sliding window may improve resistance to cycling.
 4. **Watch tab head-to-head** — expose `play_match(opponent_genome)` in the UI so two saved agents can play each other (the pygame viewer already does this via CLI).

@@ -220,7 +220,7 @@ python scripts/crp_gui.py
 
 | Tab | What it does |
 |---|---|
-| **Train** | Set population, generations, tournament format, seed and workers. Start/stop a run and watch generation, best/mean fitness, champion ELO and record update live on a chart — plus a spectator arena that plays one match between champions after each completed generation (play/pause + speed; toggle per-generation). |
+| **Train** | Set population, generations, tournament format, match length (short/full/overtime), seed and workers. Start/stop a run and watch generation, best/mean fitness, champion ELO and record update live on a chart — plus a spectator arena that plays one match between champions after each completed generation (play/pause + speed; toggle per-generation). |
 | **Watch** | Load an agent and watch it play a match on the arena — towers, troops, elixir and crowns — with play/pause, scrubbing and a speed control. |
 | **Runs** | Every past run with its generation count and best score. Select two or more to compare their fitness curves. |
 | **Agents** | Load a saved agent and play it against all five scripted baselines, or head-to-head against a second agent. |
@@ -531,6 +531,23 @@ ELO update (per matchup, K = 32):
   ELO_new  = ELO_old + K × (actual - expected)
   where actual is the agent's share of the points actually won.
 ```
+
+### Match rules: one setting, every evaluation path
+
+Every match in a run — tournament rounds *and* scripted scoring — honours the
+same rule overrides so an agent is never graded on a different game than it was
+selected for. Two sources feed `EvolutionTrainer._sim_overrides()`:
+
+| Source | Precedence | What it controls |
+|--------|-----------|------------------|
+| `TrainingConfig.match_duration` (desktop UI: **Match length**) | named preset | `full` = 1800 ticks, `short` = 600, `overtime` = 2400 regulation ticks; overtime and elixir stay at engine defaults unless overridden below. The desktop app's Train tab defaults to *short* for fast feedback loops. |
+| `--sim-config sim_game.yaml` (CLI) / `TrainingConfig.sim_config_path` | **wins** over the preset | Per-field overrides: `match_duration_ticks`, `overtime_ticks`, `elixir_regen_rate`. A deliberate per-file choice must not be clobbered by a dropdown. |
+
+A plain full-length run passes *no* override at all, so it stays bit-identical
+to engine defaults (180 s regulation + sudden-death overtime at the real elixir
+rate). This was a live defect until Round 10: `match_duration` never reached the
+tournament path — every real training run silently played full-length matches no
+matter what the config or UI said.
 
 ### Configuring it
 
