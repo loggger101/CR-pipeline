@@ -1062,7 +1062,10 @@ learned:
 
 ## 📄 License
 
-[To be determined]
+MIT, see [`LICENSE`](LICENSE). That covers the code and configuration. The
+Clash Royale card statistics in `assets/card_data.json` are game data owned by
+Supercell, reproduced here only so agents can be trained against the real game,
+and they are not licensed by this repository.
 
 ---
 
